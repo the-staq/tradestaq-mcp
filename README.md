@@ -74,7 +74,8 @@ Token is stored locally at `~/.tradestaq/mcp-config.json` with restricted permis
 |------|-------------|
 | `get_price` | Current price, 24h change, volume |
 | `get_candles` | OHLCV candlestick data (1m to 1d) |
-| `search_markets` | Find trading pairs on connected exchanges |
+| `list_exchanges` | List connected exchange accounts |
+| `search_markets` | Find trading pairs on a specific exchange |
 
 ### Portfolio
 
@@ -108,14 +109,38 @@ Token is stored locally at `~/.tradestaq/mcp-config.json` with restricted permis
 | `get_bot_status` | Detailed bot metrics and config |
 | `deploy_bot` | Deploy a strategy as a trading bot |
 | `stop_bot` | Stop a running bot |
+| `close_position` | Close an open position (full or partial) |
 
 `deploy_bot` defaults to paper trading. Pass `live: true` for real money.
+
+### Trade History
+
+| Tool | Description |
+|------|-------------|
+| `get_trade_history` | Closed trades with PnL, entry/exit prices |
+| `get_performance_metrics` | ROI, win rate, Sortino ratio, PnL breakdown |
+
+### Copy Trading
+
+| Tool | Description |
+|------|-------------|
+| `list_top_traders` | Browse the leaderboard of top traders |
+| `follow_trader` | Subscribe to copy a trader's trades |
+
+### Advisor
+
+| Tool | Description |
+|------|-------------|
+| `suggest_strategies` | Match strategies to your risk profile |
+| `get_market_context` | Trend, volatility, support/resistance for a symbol |
 
 ## Prompt Templates
 
 **Trading Assistant** — Start a conversation about your portfolio and positions. The AI calls `get_portfolio` and `get_positions` to ground its responses in your actual data.
 
 **Strategy Builder** — Walk through creating, backtesting, and deploying a strategy. Pass an optional `goal` like "momentum strategy for ETH" to get focused suggestions.
+
+**Portfolio Reviewer** — Deep analysis of your portfolio, positions, trade history, and performance. Identifies what's working, what isn't, and suggests improvements.
 
 ## Architecture
 
@@ -163,7 +188,7 @@ Error codes: `AUTH_EXPIRED`, `TIMEOUT`, `RATE_LIMITED`, `NETWORK_ERROR`, `HTTP_4
 - OAuth PKCE flow with browser-based authentication
 - Token stored with 0600 file permissions
 - Localhost-only OAuth callbacks
-- `deploy_bot` and `stop_bot` marked as destructive (AI confirms with user before calling)
+- `deploy_bot`, `stop_bot`, `close_position`, and `follow_trader` are destructive operations (AI confirms with user)
 
 ## License
 

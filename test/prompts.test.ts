@@ -24,8 +24,9 @@ describe('prompt registration', () => {
     const promptSpy = vi.spyOn(server, 'prompt')
     registerPrompts(server)
 
-    expect(promptSpy).toHaveBeenCalledTimes(2)
+    expect(promptSpy).toHaveBeenCalledTimes(3)
     expect(promptSpy.mock.calls[0][0]).toBe('trading-assistant')
     expect(promptSpy.mock.calls[1][0]).toBe('strategy-builder')
+    expect(promptSpy.mock.calls[2][0]).toBe('portfolio-reviewer')
   })
 })

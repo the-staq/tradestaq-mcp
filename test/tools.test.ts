@@ -5,6 +5,9 @@ import { registerPortfolioTools } from '../src/tools/portfolio.js'
 import { registerStrategyTools } from '../src/tools/strategy.js'
 import { registerBacktestTools } from '../src/tools/backtest.js'
 import { registerBotTools } from '../src/tools/bot.js'
+import { registerTradeTools } from '../src/tools/trades.js'
+import { registerCopyTradingTools } from '../src/tools/copy-trading.js'
+import { registerAdvisorTools } from '../src/tools/advisor.js'
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -41,5 +44,20 @@ describe('tool registration', () => {
   it('registerBotTools registers without error', () => {
     const server = createServer()
     expect(() => registerBotTools(server)).not.toThrow()
+  })
+
+  it('registerTradeTools registers without error', () => {
+    const server = createServer()
+    expect(() => registerTradeTools(server)).not.toThrow()
+  })
+
+  it('registerCopyTradingTools registers without error', () => {
+    const server = createServer()
+    expect(() => registerCopyTradingTools(server)).not.toThrow()
+  })
+
+  it('registerAdvisorTools registers without error', () => {
+    const server = createServer()
+    expect(() => registerAdvisorTools(server)).not.toThrow()
   })
 })
