@@ -1,6 +1,6 @@
 import http from 'node:http'
 import crypto from 'node:crypto'
-import { exec } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { loadConfig, saveConfig, clearToken, isAuthenticated } from '../config.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
@@ -62,8 +62,22 @@ export function registerAuthTools(server: McpServer) {
 
         fetch(authorizeUrl).then(r => r.json() as Promise<any>).then(data => {
           if (data.error) { srv.close(); resolve({ isError: true, content: [{ type: 'text' as const, text: `Auth failed: ${data.error}` }] }); return }
+
+          let parsedUrl: URL
+          try { parsedUrl = new URL(data.loginUrl) } catch {
+            srv.close()
+            resolve({ isError: true, content: [{ type: 'text' as const, text: 'Auth failed: server returned an invalid login URL.' }] })
+            return
+          }
+          if (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') {
+            srv.close()
+            resolve({ isError: true, content: [{ type: 'text' as const, text: 'Auth failed: server returned a non-HTTP login URL.' }] })
+            return
+          }
+
           const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open'
-          exec(`${openCmd} "${data.loginUrl}"`)
+          execFile(openCmd, [parsedUrl.href])
+          // Do NOT resolve here — wait for the OAuth callback or timeout
         }).catch(err => {
           srv.close()
           resolve({ isError: true, content: [{ type: 'text' as const, text: `Failed to start auth: ${(err as Error).message}` }] })

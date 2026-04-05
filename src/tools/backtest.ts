@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { api, ApiError } from '../api.js'
+import { jsonResult, withErrorHandling } from '../helpers.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 export function registerBacktestTools(server: McpServer) {
@@ -10,7 +11,7 @@ export function registerBacktestTools(server: McpServer) {
     exchange: z.string().describe('Exchange to backtest on'),
     period: z.enum(['1m', '3m', '6m', '1y']).default('3m'),
     initialBalance: z.number().default(10000),
-  }, async ({ strategyId, symbol, exchange, period, initialBalance }) => {
+  }, withErrorHandling(async ({ strategyId, symbol, exchange, period, initialBalance }) => {
     const now = new Date()
     const months: Record<string, number> = { '1m': 1, '3m': 3, '6m': 6, '1y': 12 }
     const startDate = new Date(now)
@@ -33,16 +34,11 @@ export function registerBacktestTools(server: McpServer) {
         const result = await api<any>(`/api/backtests/${jobId}`)
         if (result.status === 'completed' || result.results) {
           const r = result.results || result
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                status: 'completed', strategy: strategyId, symbol, period,
-                metrics: { roi: r.roi, totalPnl: r.totalPnl, maxDrawdown: r.maxDrawdown, winRate: r.winRate, sharpeRatio: r.sharpeRatio, profitFactor: r.profitFactor, totalTrades: r.totalTrades },
-                equity: { start: initialBalance, end: r.finalBalance || r.equity },
-              }, null, 2),
-            }],
-          }
+          return jsonResult({
+            status: 'completed', strategy: strategyId, symbol, period,
+            metrics: { roi: r.roi, totalPnl: r.totalPnl, maxDrawdown: r.maxDrawdown, winRate: r.winRate, sharpeRatio: r.sharpeRatio, profitFactor: r.profitFactor, totalTrades: r.totalTrades },
+            equity: { start: initialBalance, end: r.finalBalance || r.equity },
+          })
         }
         if (result.status === 'failed') {
           return { isError: true, content: [{ type: 'text' as const, text: `Backtest failed: ${result.error || 'unknown error'}` }] }
@@ -53,25 +49,20 @@ export function registerBacktestTools(server: McpServer) {
       }
     }
 
-    return { content: [{ type: 'text' as const, text: JSON.stringify({ status: 'timeout', jobId, message: 'Still running. Use get_backtest_results to check later.' }, null, 2) }] }
-  })
+    return jsonResult({ status: 'timeout', jobId, message: 'Still running. Use get_backtest_results to check later.' })
+  }))
 
   server.tool('get_backtest_results', 'Check status/results of a previously started backtest.', {
     jobId: z.string().describe('Backtest job ID'),
-  }, async ({ jobId }) => {
+  }, withErrorHandling(async ({ jobId }) => {
     const result = await api<any>(`/api/backtests/${jobId}`)
     if (result.status === 'completed' || result.results) {
       const r = result.results || result
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            status: 'completed',
-            metrics: { roi: r.roi, totalPnl: r.totalPnl, maxDrawdown: r.maxDrawdown, winRate: r.winRate, sharpeRatio: r.sharpeRatio, totalTrades: r.totalTrades },
-          }, null, 2),
-        }],
-      }
+      return jsonResult({
+        status: 'completed',
+        metrics: { roi: r.roi, totalPnl: r.totalPnl, maxDrawdown: r.maxDrawdown, winRate: r.winRate, sharpeRatio: r.sharpeRatio, totalTrades: r.totalTrades },
+      })
     }
     return { content: [{ type: 'text' as const, text: `Status: ${result.status || 'pending'}. Try again in a few seconds.` }] }
-  })
+  }))
 }
