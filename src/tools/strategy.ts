@@ -22,6 +22,22 @@ export function registerStrategyTools(server: McpServer) {
   }, withErrorHandling(async ({ id }) => {
     const raw = await api<any>(`/api/tradedroid/strategies/${id}`)
     const s = raw.doc || raw
+    const lv = s.latestVersion || {}
+    // Extract parameter groups into a clean format
+    const parameterGroups = (lv.parameterGroups || []).map((g: any) => ({
+      group: g.groupName,
+      parameters: (g.parameters || []).map((p: any) => ({
+        name: p.name,
+        label: p.label,
+        type: p.inputType,
+        default: p.defaultValue,
+        ...(p.tooltip ? { description: p.tooltip } : {}),
+        ...(p.options ? { options: p.options } : {}),
+        ...(p.rangeMin != null ? { min: p.rangeMin } : {}),
+        ...(p.rangeMax != null ? { max: p.rangeMax } : {}),
+      })),
+    }))
+
     return jsonResult({
       id: s.id || s._id,
       name: s.name,
@@ -30,10 +46,12 @@ export function registerStrategyTools(server: McpServer) {
       category: s.category,
       tags: s.tags,
       strategyType: s.strategyType,
-      stats: s.stats,
-      backtest: s.backtest,
-      latestVersion: s.latestVersion ? { timeframe: s.latestVersion.timeframe, indicators: s.latestVersion.indicators } : undefined,
+      version: lv.semanticVersion || lv.version,
+      timeframe: lv.validationConfig?.timeframe,
+      requiredIndicators: lv.requiredIndicators,
+      parameterGroups,
       dcaConfig: s.dcaConfig,
+      stats: s.stats,
       pricing: s.pricing,
       rating: s.rating,
       reviewCount: s.reviewCount,
