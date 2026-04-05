@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { registerAuthTools } from './tools/auth.js'
@@ -13,10 +16,13 @@ import { registerCopyTradingTools } from './tools/copy-trading.js'
 import { registerAdvisorTools } from './tools/advisor.js'
 import { registerPrompts } from './prompts/index.js'
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const version = fs.readFileSync(path.join(__dirname, '..', 'VERSION'), 'utf-8').trim()
+
 const server = new McpServer(
   {
     name: 'tradestaq',
-    version: '0.1.0',
+    version,
   },
   {
     capabilities: { logging: {} },
