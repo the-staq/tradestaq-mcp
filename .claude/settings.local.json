@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "mcp__tradestaq__check_auth"
-    ]
-  }
-}
