@@ -82,7 +82,8 @@ export function registerAuthTools(server: McpServer) {
             })
             const tokenData = (await tokenRes.json()) as any
 
-            if (!tokenRes.ok || !tokenData.token) {
+            const token = tokenData.access_token || tokenData.token
+            if (!tokenRes.ok || !token) {
               res.writeHead(400, { 'Content-Type': 'text/html' })
               res.end('<html><body><h2>Token exchange failed</h2><p>Please try again.</p></body></html>')
               srv.close()
@@ -90,7 +91,7 @@ export function registerAuthTools(server: McpServer) {
               return
             }
 
-            saveConfig({ ...config, token: tokenData.token, tokenExpiresAt: Date.now() + (tokenData.expires_in || 604800) * 1000 })
+            saveConfig({ ...config, token, tokenExpiresAt: Date.now() + (tokenData.expires_in || 604800) * 1000 })
             res.writeHead(200, { 'Content-Type': 'text/html' })
             res.end('<html><body><h2>Authenticated!</h2><p>You can close this window and return to your AI assistant.</p></body></html>')
             srv.close()
