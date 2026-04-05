@@ -65,7 +65,11 @@ Token is stored locally at `~/.tradestaq/mcp-config.json` with restricted permis
 
 | Tool | Description |
 |------|-------------|
+| `login` | Log in with email and password |
 | `authenticate` | Log in via browser (OAuth + PKCE) |
+| `check_auth` | Check authentication status |
+| `set_token` | Manually set a JWT token |
+| `connect_exchange` | Connect an exchange account via browser |
 | `logout` | Remove stored credentials |
 
 ### Market Data
@@ -93,6 +97,7 @@ Token is stored locally at `~/.tradestaq/mcp-config.json` with restricted permis
 | `explain_strategy` | Plain-English explanation with risk profile |
 | `compare_strategies` | Side-by-side metrics comparison |
 | `create_strategy` | Create a strategy from TradeDroid code |
+| `generate_strategy` | Generate a strategy from natural language using AI |
 
 ### Backtesting
 

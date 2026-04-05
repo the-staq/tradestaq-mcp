@@ -69,4 +69,38 @@ export function registerStrategyTools(server: McpServer) {
     const data = await api<any>('/api/user-strategies', { method: 'POST', body: { name, description, code, market, timeframe } })
     return { content: [{ type: 'text' as const, text: `Strategy "${name}" created.\nID: ${data.id || data._id}\n\nBacktest it with what_if_backtest or deploy with deploy_bot.` }] }
   }))
+
+  server.tool('generate_strategy', 'Generate a trading strategy from a natural language description using AI. Describe what you want and AI creates the TradeDroid code.', {
+    description: z.string().describe('Natural language description of the strategy you want (e.g. "momentum strategy for ETH that buys on RSI oversold and sells on RSI overbought")'),
+    market: z.enum(['spot', 'futures']).default('futures'),
+    timeframe: z.string().default('1h').describe('Primary timeframe (e.g. 1h, 4h, 1d)'),
+  }, withErrorHandling(async ({ description, market, timeframe }) => {
+    // The AI builder endpoint is a streaming endpoint, but for MCP we just need the final result
+    // Call it as a regular POST and collect the response
+    const data = await api<any>('/api/ai/strategy-builder', {
+      method: 'POST',
+      body: {
+        messages: [{ role: 'user', content: description }],
+        market,
+        timeframe,
+      },
+      timeout: 120_000, // AI generation can take a while
+    })
+
+    // The response may be a stream or a JSON object depending on the endpoint
+    // If it has a strategy object, return it
+    if (data.strategy) {
+      return jsonResult({
+        name: data.strategy.name,
+        code: data.strategy.code,
+        description: data.strategy.description,
+        market,
+        timeframe,
+        message: 'Strategy generated. Use create_strategy to save it, or what_if_backtest to test it first.',
+      })
+    }
+
+    // If the response is just text/content, return it as-is
+    return { content: [{ type: 'text' as const, text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] }
+  }))
 }

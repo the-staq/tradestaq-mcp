@@ -1,4 +1,4 @@
-import { loadConfig } from './config.js'
+import { loadConfig, saveConfig } from './config.js'
 
 export class ApiError extends Error {
   constructor(
@@ -12,6 +12,41 @@ export class ApiError extends Error {
   }
 }
 
+async function refreshTokenIfNeeded(): Promise<void> {
+  const config = loadConfig()
+  if (!config.token || !config.tokenExpiresAt) return
+
+  // Only refresh if expiring within 1 hour
+  const oneHour = 60 * 60 * 1000
+  if (config.tokenExpiresAt - Date.now() > oneHour) return
+
+  try {
+    // Use Payload's built-in refresh endpoint
+    const res = await fetch(`${config.baseUrl}/api/users/refresh-token`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.token}`,
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (res.ok) {
+      const data = (await res.json()) as any
+      const newToken = data.refreshedToken || data.token || data.access_token
+      if (newToken) {
+        saveConfig({
+          ...config,
+          token: newToken,
+          tokenExpiresAt: Date.now() + 7 * 24 * 3600 * 1000,
+        })
+      }
+    }
+    // If refresh fails, continue with existing token — it might still work
+  } catch {
+    // Silently continue — token refresh is best-effort
+  }
+}
+
 export async function api<T = unknown>(
   path: string,
   options: { method?: string; body?: unknown; timeout?: number } = {},
@@ -20,6 +55,8 @@ export async function api<T = unknown>(
   if (!config.token) {
     throw new ApiError(401, 'AUTH_EXPIRED', 'Not authenticated. Run the authenticate tool first.')
   }
+
+  await refreshTokenIfNeeded()
 
   const url = `${config.baseUrl}${path}`
   const controller = new AbortController()

@@ -188,6 +188,32 @@ export function registerAuthTools(server: McpServer) {
     return { content: [{ type: 'text' as const, text: 'Token saved. You can now use all TradeStaq tools.' }] }
   })
 
+  server.tool(
+    'connect_exchange',
+    'Connect a new exchange account via browser. Opens a page where you securely enter your exchange API keys. Keys never enter the chat.',
+    {},
+    async () => {
+      const config = loadConfig()
+      const url = `${config.baseUrl}/dashboard/exchanges/new`
+
+      try {
+        const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open'
+        execFile(openCmd, [url], () => {
+          // Ignore errors — the URL is also returned in the response
+        })
+      } catch {
+        // Best effort — URL is in the response text
+      }
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Opening TradeStaq exchange setup page in your browser.\n\nURL: ${url}\n\nAdd your exchange API key and secret there. Once connected, use list_exchanges to see your accounts.`,
+        }],
+      }
+    },
+  )
+
   server.tool('logout', 'Remove stored TradeStaq credentials.', {}, async () => {
     clearToken()
     return { content: [{ type: 'text' as const, text: 'Logged out. Use login to sign in again.' }] }
