@@ -53,7 +53,7 @@ export function clearToken(): void {
 
 export function isAuthenticated(): boolean {
   const config = loadConfig()
-  if (!config.token) return false
+  if (!config.token || typeof config.token !== 'string' || config.token.length < 10) return false
   if (config.tokenExpiresAt && Date.now() > config.tokenExpiresAt) return false
   return true
 }

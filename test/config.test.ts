@@ -118,7 +118,7 @@ describe('isAuthenticated', () => {
   it('returns true when token is valid and not expired', async () => {
     const { configModule, fs } = await freshImport()
     ;(fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(
-      JSON.stringify({ token: 'tok', tokenExpiresAt: Date.now() + 60000 }),
+      JSON.stringify({ token: 'eyJhbGciOiJIUzI1NiJ9.test-token-value', tokenExpiresAt: Date.now() + 60000 }),
     )
 
     expect(configModule.isAuthenticated()).toBe(true)
