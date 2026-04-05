@@ -16,14 +16,24 @@ let _cache: McpConfig | null = null
 export function loadConfig(): McpConfig {
   if (_cache) return _cache
   const defaults: McpConfig = { baseUrl: 'https://tradestaq.com' }
+
+  // Environment variables override file config (useful for CI, Claude Code, etc.)
+  const envToken = process.env.TRADESTAQ_TOKEN
+  const envBaseUrl = process.env.TRADESTAQ_BASE_URL
+
   try {
     const raw = fs.readFileSync(CONFIG_FILE, 'utf-8')
     const config = { ...defaults, ...JSON.parse(raw) }
+    if (envToken) config.token = envToken
+    if (envBaseUrl) config.baseUrl = envBaseUrl
     _cache = config
     return config
   } catch {
-    _cache = defaults
-    return defaults
+    const config = { ...defaults }
+    if (envToken) config.token = envToken
+    if (envBaseUrl) config.baseUrl = envBaseUrl
+    _cache = config
+    return config
   }
 }
 

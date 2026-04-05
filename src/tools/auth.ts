@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import http from 'node:http'
 import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
@@ -86,6 +87,29 @@ export function registerAuthTools(server: McpServer) {
         setTimeout(() => { srv.close(); resolve({ isError: true, content: [{ type: 'text' as const, text: 'Auth timed out after 5 minutes.' }] }) }, 300_000)
       })
     })
+  })
+
+  server.tool('check_auth', 'Check if you are authenticated with TradeStaq.', {}, async () => {
+    if (isAuthenticated()) {
+      const config = loadConfig()
+      const expiresIn = config.tokenExpiresAt ? Math.round((config.tokenExpiresAt - Date.now()) / 3600000) : 'unknown'
+      return { content: [{ type: 'text' as const, text: `Authenticated. Token expires in ~${expiresIn} hours.\nAPI: ${config.baseUrl}` }] }
+    }
+    return { content: [{ type: 'text' as const, text: 'Not authenticated. Run authenticate (browser) or set_token (manual) to log in.' }] }
+  })
+
+  server.tool('set_token', 'Manually set a JWT token for authentication. Use this when the browser OAuth flow is not available (e.g. in CLI or agent contexts). Get a token from your TradeStaq dashboard settings.', {
+    token: z.string().describe('JWT token from TradeStaq'),
+    baseUrl: z.string().optional().describe('API base URL (default: https://tradestaq.com)'),
+  }, async ({ token, baseUrl }) => {
+    const config = loadConfig()
+    saveConfig({
+      ...config,
+      token,
+      tokenExpiresAt: Date.now() + 7 * 24 * 3600 * 1000, // assume 7 day TTL
+      ...(baseUrl ? { baseUrl } : {}),
+    })
+    return { content: [{ type: 'text' as const, text: 'Token saved. You can now use all TradeStaq tools.' }] }
   })
 
   server.tool('logout', 'Remove stored TradeStaq credentials.', {}, async () => {
