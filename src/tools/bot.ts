@@ -63,4 +63,23 @@ export function registerBotTools(server: McpServer) {
     await api<any>(`/api/bots/${id}/status`, { method: 'PUT', body: { status: 'stopped' } })
     return { content: [{ type: 'text' as const, text: `Bot ${id} stopped. Open positions remain until manually closed.` }] }
   }))
+
+  server.tool('close_position', 'Close an open trading position. WARNING: This executes a market order to close your position.', {
+    tradeId: z.string().describe('Trade/position ID to close'),
+    exchangeId: z.string().describe('Exchange account ID where the position is open'),
+    symbol: z.string().describe('Trading pair (e.g. BTC/USDT)'),
+    percentage: z.number().min(1).max(100).default(100).describe('Percentage of position to close (100 = full close)'),
+  }, withErrorHandling(async ({ tradeId, exchangeId, symbol, percentage }) => {
+    const data = await api<any>('/api/positions/close', {
+      method: 'POST',
+      body: { tradeId, exchangeId, symbol, size: String(percentage) },
+    })
+    const pnl = data.pnl ?? data.body?.pnl
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Position closed${percentage < 100 ? ` (${percentage}%)` : ''}.\nSymbol: ${symbol}\n${pnl != null ? `PnL: ${pnl}` : ''}\n\nUse get_positions to verify.`,
+      }],
+    }
+  }))
 }

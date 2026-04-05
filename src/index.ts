@@ -8,6 +8,9 @@ import { registerPortfolioTools } from './tools/portfolio.js'
 import { registerStrategyTools } from './tools/strategy.js'
 import { registerBacktestTools } from './tools/backtest.js'
 import { registerBotTools } from './tools/bot.js'
+import { registerTradeTools } from './tools/trades.js'
+import { registerCopyTradingTools } from './tools/copy-trading.js'
+import { registerAdvisorTools } from './tools/advisor.js'
 import { registerPrompts } from './prompts/index.js'
 
 const server = new McpServer(
@@ -27,6 +30,9 @@ registerPortfolioTools(server)
 registerStrategyTools(server)
 registerBacktestTools(server)
 registerBotTools(server)
+registerTradeTools(server)
+registerCopyTradingTools(server)
+registerAdvisorTools(server)
 registerPrompts(server)
 
 // Connect via stdio

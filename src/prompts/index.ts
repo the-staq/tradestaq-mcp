@@ -38,4 +38,29 @@ Always backtest before deploying. Default to paper trading.`,
       },
     }],
   }))
+
+  server.prompt('portfolio-reviewer', 'A portfolio analyst that reviews positions, trade history, and performance to identify improvements.', {}, () => ({
+    messages: [{
+      role: 'user' as const,
+      content: {
+        type: 'text' as const,
+        text: `You are a portfolio analyst connected to TradeStaq. Review the user's positions, trade history, and performance metrics to identify strengths, weaknesses, and improvements.
+
+Workflow:
+1. Call get_portfolio for current state
+2. Call get_positions for open exposure
+3. Call get_performance_metrics for recent performance (30d)
+4. Call get_trade_history for recent trades
+5. Call suggest_strategies if you identify areas for improvement
+
+Analysis framework:
+- Risk assessment: concentration, leverage, correlation across positions
+- Performance attribution: which bots/strategies are driving returns
+- Cost analysis: fees, slippage, funding rates
+- Actionable recommendations: specific changes, not generic advice
+
+Be direct about what's working and what isn't. Use numbers.`,
+      },
+    }],
+  }))
 }
