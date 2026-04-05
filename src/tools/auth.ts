@@ -7,7 +7,49 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 export function registerAuthTools(server: McpServer) {
 
-  server.tool('authenticate', 'Log in to TradeStaq via browser. Opens a secure browser window. Credentials never enter the chat.', {}, async () => {
+  server.tool('login', 'Log in to TradeStaq with email and password. This is the primary way to authenticate.', {
+    email: z.string().describe('Your TradeStaq email address'),
+    password: z.string().describe('Your TradeStaq password'),
+  }, async ({ email, password }) => {
+    const config = loadConfig()
+
+    try {
+      const res = await fetch(`${config.baseUrl}/api/users/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      })
+
+      const data = (await res.json()) as any
+
+      if (!res.ok || !data.token) {
+        const msg = data.errors?.[0]?.message || data.message || 'Login failed'
+        return { isError: true, content: [{ type: 'text' as const, text: `Login failed: ${msg}` }] }
+      }
+
+      saveConfig({
+        ...config,
+        token: data.token,
+        tokenExpiresAt: Date.now() + 7 * 24 * 3600 * 1000,
+      })
+
+      const userName = data.user?.name || data.user?.email || email
+      return { content: [{ type: 'text' as const, text: `Logged in as ${userName}. You can now use all TradeStaq tools.` }] }
+    } catch (err) {
+      return { isError: true, content: [{ type: 'text' as const, text: `Login failed: ${(err as Error).message}` }] }
+    }
+  })
+
+  server.tool('check_auth', 'Check if you are authenticated with TradeStaq.', {}, async () => {
+    if (isAuthenticated()) {
+      const config = loadConfig()
+      const expiresIn = config.tokenExpiresAt ? Math.round((config.tokenExpiresAt - Date.now()) / 3600000) : 'unknown'
+      return { content: [{ type: 'text' as const, text: `Authenticated. Token expires in ~${expiresIn} hours.\nAPI: ${config.baseUrl}` }] }
+    }
+    return { content: [{ type: 'text' as const, text: 'Not authenticated. Use the login tool with your email and password.' }] }
+  })
+
+  server.tool('authenticate', 'Log in via browser OAuth flow. Use this from Claude Desktop. For Claude Code or CLI, use the login tool instead.', {}, async () => {
     if (isAuthenticated()) {
       return { content: [{ type: 'text' as const, text: 'Already authenticated. Use logout to switch accounts.' }] }
     }
@@ -78,7 +120,6 @@ export function registerAuthTools(server: McpServer) {
 
           const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open'
           execFile(openCmd, [parsedUrl.href])
-          // Do NOT resolve here — wait for the OAuth callback or timeout
         }).catch(err => {
           srv.close()
           resolve({ isError: true, content: [{ type: 'text' as const, text: `Failed to start auth: ${(err as Error).message}` }] })
@@ -89,16 +130,7 @@ export function registerAuthTools(server: McpServer) {
     })
   })
 
-  server.tool('check_auth', 'Check if you are authenticated with TradeStaq.', {}, async () => {
-    if (isAuthenticated()) {
-      const config = loadConfig()
-      const expiresIn = config.tokenExpiresAt ? Math.round((config.tokenExpiresAt - Date.now()) / 3600000) : 'unknown'
-      return { content: [{ type: 'text' as const, text: `Authenticated. Token expires in ~${expiresIn} hours.\nAPI: ${config.baseUrl}` }] }
-    }
-    return { content: [{ type: 'text' as const, text: 'Not authenticated. Run authenticate (browser) or set_token (manual) to log in.' }] }
-  })
-
-  server.tool('set_token', 'Manually set a JWT token for authentication. Use this when the browser OAuth flow is not available (e.g. in CLI or agent contexts). Get a token from your TradeStaq dashboard settings.', {
+  server.tool('set_token', 'Manually set a JWT token. For advanced use only.', {
     token: z.string().describe('JWT token from TradeStaq'),
     baseUrl: z.string().optional().describe('API base URL (default: https://tradestaq.com)'),
   }, async ({ token, baseUrl }) => {
@@ -106,7 +138,7 @@ export function registerAuthTools(server: McpServer) {
     saveConfig({
       ...config,
       token,
-      tokenExpiresAt: Date.now() + 7 * 24 * 3600 * 1000, // assume 7 day TTL
+      tokenExpiresAt: Date.now() + 7 * 24 * 3600 * 1000,
       ...(baseUrl ? { baseUrl } : {}),
     })
     return { content: [{ type: 'text' as const, text: 'Token saved. You can now use all TradeStaq tools.' }] }
@@ -114,6 +146,6 @@ export function registerAuthTools(server: McpServer) {
 
   server.tool('logout', 'Remove stored TradeStaq credentials.', {}, async () => {
     clearToken()
-    return { content: [{ type: 'text' as const, text: 'Logged out. Run authenticate to log in again.' }] }
+    return { content: [{ type: 'text' as const, text: 'Logged out. Use login to sign in again.' }] }
   })
 }
