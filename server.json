@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.the-staq/tradestaq-mcp",
+  "description": "AI-powered crypto trading tools. Strategies, backtests, bots, and portfolio management.",
+  "repository": {
+    "url": "https://github.com/the-staq/tradestaq-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@the-staq/tradestaq-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
