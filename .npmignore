@@ -1,0 +1,8 @@
+src/
+test/
+vitest.config.ts
+tsconfig.json
+.github/
+.claude/
+.gstack/
+*.tsbuildinfo

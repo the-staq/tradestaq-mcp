@@ -4,7 +4,59 @@ Trading intelligence for AI agents. Connect Claude, GPT, or any MCP-compatible A
 
 Create strategies, backtest them, deploy bots, monitor positions, and manage your portfolio, all from conversation.
 
-## Install
+## Quick Start
+
+### Option A: Remote server (no install needed)
+
+For MCP clients that support HTTP transport:
+
+```json
+{
+  "mcpServers": {
+    "tradestaq": {
+      "url": "https://mcp.tradestaq.com/mcp"
+    }
+  }
+}
+```
+
+### Option B: npx (recommended for local)
+
+No clone, no build. Just add to your MCP config:
+
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "tradestaq": {
+      "command": "npx",
+      "args": ["-y", "@tradestaq/mcp-server"]
+    }
+  }
+}
+```
+
+**Cursor** (`.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "tradestaq": {
+      "command": "npx",
+      "args": ["-y", "@tradestaq/mcp-server"]
+    }
+  }
+}
+```
+
+**Claude Code:**
+
+```sh
+claude mcp add tradestaq -- npx -y @tradestaq/mcp-server
+```
+
+### Option C: Clone and build
 
 ```sh
 git clone https://github.com/the-staq/tradestaq-mcp.git
@@ -13,51 +65,16 @@ npm install
 npm run build
 ```
 
-## Configure
-
-### Claude Desktop
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "tradestaq": {
-      "command": "node",
-      "args": ["/path/to/tradestaq-mcp/dist/index.js"]
-    }
-  }
-}
-```
-
-### Cursor
-
-Add to `.cursor/mcp.json` in your project:
-
-```json
-{
-  "mcpServers": {
-    "tradestaq": {
-      "command": "node",
-      "args": ["/path/to/tradestaq-mcp/dist/index.js"]
-    }
-  }
-}
-```
-
-### Claude Code
-
-```sh
-claude mcp add tradestaq node /path/to/tradestaq-mcp/dist/index.js
-```
-
-Replace `/path/to/tradestaq-mcp` with the actual path where you cloned the repo.
+Then point your MCP client to `dist/index.js`.
 
 ## Authenticate
 
-After configuring, ask your AI assistant to run the `authenticate` tool. A browser window opens where you log in to TradeStaq. Credentials never enter the chat.
+After adding the server, ask your AI assistant to log in:
 
-Token is stored locally at `~/.tradestaq/mcp-config.json` with restricted permissions (0600).
+- **"Log me in to TradeStaq"** — uses email/password directly
+- **"Authenticate with TradeStaq"** — opens a browser window for secure OAuth login
+
+Credentials never enter the chat when using the browser flow. Token is stored locally at `~/.tradestaq/mcp-config.json` with restricted permissions (0600).
 
 ## Tools
 

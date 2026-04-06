@@ -1,22 +1,38 @@
 {
   "name": "@tradestaq/mcp-server",
   "version": "0.1.0",
-  "description": "TradeStaq MCP Server — trading intelligence for AI agents",
+  "description": "TradeStaq MCP Server — trading intelligence for AI agents. Create strategies, backtest, deploy bots, and manage your portfolio from any AI assistant.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "tradestaq-mcp": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "VERSION",
+    "README.md",
+    "CHANGELOG.md"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "start:http": "node dist/index.js --http",
     "test": "vitest run",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
-  "keywords": ["mcp", "tradestaq", "trading", "ai", "model-context-protocol"],
+  "keywords": ["mcp", "tradestaq", "trading", "ai", "model-context-protocol", "crypto", "bot", "backtest", "strategy", "claude", "cursor"],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/the-staq/tradestaq-mcp.git"
+  },
+  "homepage": "https://tradestaq.com",
+  "author": "TradeStaq <hello@tradestaq.com>",
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^3.24.0"
