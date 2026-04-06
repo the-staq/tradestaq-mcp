@@ -1,8 +1,19 @@
 # TradeStaq MCP Server
 
-Trading intelligence for AI agents. Connect Claude, GPT, or any MCP-compatible AI to your TradeStaq account.
+[![npm version](https://img.shields.io/npm/v/@tradestaq/mcp-server)](https://www.npmjs.com/package/@tradestaq/mcp-server)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-Create strategies, backtest them, deploy bots, monitor positions, and manage your portfolio, all from conversation.
+**31 AI-powered trading tools for Claude, Cursor, and any MCP client.**
+
+Create strategies, backtest them, deploy trading bots, copy top traders, monitor positions, and manage your crypto portfolio, all from conversation. Supports Binance, Bybit, OKX, Bitget, Hyperliquid, dYdX, and more.
+
+```
+"Show me my portfolio" → get_portfolio
+"Backtest GhostRider on BTC/USDT for 3 months" → what_if_backtest
+"Deploy it on my Binance account" → deploy_bot
+"Who are the top traders this month?" → list_top_traders
+"Generate a momentum strategy for ETH" → generate_strategy
+```
 
 ## Quick Start
 

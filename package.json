@@ -1,7 +1,7 @@
 {
   "name": "@tradestaq/mcp-server",
   "version": "0.1.0",
-  "description": "TradeStaq MCP Server — trading intelligence for AI agents. Create strategies, backtest, deploy bots, and manage your portfolio from any AI assistant.",
+  "description": "MCP server for automated crypto trading. 31 tools for AI agents: create strategies, backtest, deploy trading bots, copy trade, monitor positions, and manage portfolios on Binance, Bybit, OKX, and more. Works with Claude, Cursor, and any MCP client.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -20,9 +20,20 @@
     "start:http": "node dist/index.js --http",
     "test": "vitest run",
     "lint": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "version": "echo $npm_package_version > VERSION && git add VERSION",
+    "release:patch": "npm version patch && git push && git push --tags && npm publish --access public",
+    "release:minor": "npm version minor && git push && git push --tags && npm publish --access public",
+    "release:major": "npm version major && git push && git push --tags && npm publish --access public"
   },
-  "keywords": ["mcp", "tradestaq", "trading", "ai", "model-context-protocol", "crypto", "bot", "backtest", "strategy", "claude", "cursor"],
+  "keywords": [
+    "mcp", "mcp-server", "model-context-protocol",
+    "trading", "crypto", "trading-bot", "automated-trading",
+    "backtest", "strategy", "copy-trading", "portfolio",
+    "binance", "bybit", "okx", "bitget", "hyperliquid",
+    "claude", "cursor", "ai-agent", "ai-tools",
+    "tradestaq", "tradedroid", "defi"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
