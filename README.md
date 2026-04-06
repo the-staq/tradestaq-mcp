@@ -1,6 +1,6 @@
 # TradeStaq MCP Server
 
-[![npm version](https://img.shields.io/npm/v/@tradestaq/mcp-server)](https://www.npmjs.com/package/@tradestaq/mcp-server)
+[![npm version](https://img.shields.io/npm/v/@the-staq/tradestaq-mcp)](https://www.npmjs.com/package/@the-staq/tradestaq-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 **31 AI-powered trading tools for Claude, Cursor, and any MCP client.**
@@ -42,7 +42,7 @@ No clone, no build. Just add to your MCP config:
   "mcpServers": {
     "tradestaq": {
       "command": "npx",
-      "args": ["-y", "@tradestaq/mcp-server"]
+      "args": ["-y", "@the-staq/tradestaq-mcp"]
     }
   }
 }
@@ -55,7 +55,7 @@ No clone, no build. Just add to your MCP config:
   "mcpServers": {
     "tradestaq": {
       "command": "npx",
-      "args": ["-y", "@tradestaq/mcp-server"]
+      "args": ["-y", "@the-staq/tradestaq-mcp"]
     }
   }
 }
@@ -64,7 +64,7 @@ No clone, no build. Just add to your MCP config:
 **Claude Code:**
 
 ```sh
-claude mcp add tradestaq -- npx -y @tradestaq/mcp-server
+claude mcp add tradestaq -- npx -y @the-staq/tradestaq-mcp
 ```
 
 ### Option C: Clone and build

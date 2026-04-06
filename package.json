@@ -1,5 +1,5 @@
 {
-  "name": "@tradestaq/mcp-server",
+  "name": "@the-staq/tradestaq-mcp",
   "version": "0.1.0",
   "description": "MCP server for automated crypto trading. 31 tools for AI agents: create strategies, backtest, deploy trading bots, copy trade, monitor positions, and manage portfolios on Binance, Bybit, OKX, and more. Works with Claude, Cursor, and any MCP client.",
   "type": "module",
