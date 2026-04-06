@@ -175,27 +175,46 @@ Credentials never enter the chat when using the browser flow. Token is stored lo
 
 **Portfolio Reviewer** — Deep analysis of your portfolio, positions, trade history, and performance. Identifies what's working, what isn't, and suggests improvements.
 
+## Resources
+
+MCP resources provide browsable data that AI clients can read directly:
+
+| Resource | URI | Description |
+|----------|-----|-------------|
+| Portfolio | `tradestaq://portfolio` | Balances, positions, and active bots |
+| Bots | `tradestaq://bots` | All bots with status and PnL |
+| Strategies | `tradestaq://strategies` | Strategy catalog with ratings |
+
 ## Architecture
 
 ```
-┌─────────────────┐     stdio      ┌──────────────────┐     HTTPS     ┌──────────────┐
-│  Claude Desktop  │◄──────────────►│  tradestaq-mcp   │◄────────────►│  TradeStaq    │
-│  Cursor / CLI    │                │  (this server)   │  Bearer JWT  │  API          │
-└─────────────────┘                └──────────────────┘              └──────────────┘
+                    stdio                                    HTTPS
+┌──────────────┐◄──────────►┐                  ┌────────────────►┌──────────────┐
+│Claude Desktop│             │                  │                 │              │
+│Cursor / CLI  │             │  tradestaq-mcp   │   Bearer JWT    │  TradeStaq   │
+└──────────────┘             │  31 tools        │◄────────────────│  API         │
+                             │  3 prompts       │                 │              │
+┌──────────────┐  HTTP+SSE  │  3 resources      │                 └──────────────┘
+│ Any MCP      │◄──────────►│                  │
+│ client (web) │             └──────────────────┘
+└──────────────┘
 ```
 
-- Standalone process, communicates with TradeStaq API over HTTPS
-- stdio transport for local integrations
-- JWT auth via OAuth PKCE flow (browser-based, no credentials in chat)
-- All tools return structured JSON for agent consumption
+- **Two transports:** stdio (local, default) and HTTP+SSE (remote, `--http` flag)
+- Hosted at `https://mcp.tradestaq.com/mcp` for remote clients
+- JWT auth via OAuth PKCE or email/password login
+- All tools return structured JSON with error contract
+- Token auto-refresh when expiring within 1 hour
 
 ## Development
 
 ```sh
-npm run dev      # watch mode with tsx
-npm run build    # compile TypeScript
-npm run lint     # type check without emitting
-npm test         # run tests
+npm run dev        # watch mode with tsx
+npm run build      # compile TypeScript
+npm run lint       # type check without emitting
+npm test           # run tests
+npm start          # run server (stdio)
+npm run start:http # run server (HTTP+SSE on port 3100)
 ```
 
 ## Error Handling
