@@ -8,11 +8,11 @@ export function registerBacktestTools(server: McpServer) {
   server.tool('what_if_backtest', 'Run a backtest on a strategy. Async, may take 30-120 seconds. Returns full performance metrics.', {
     strategyId: z.string().describe('Strategy ID to backtest'),
     symbol: z.string().default('BTC/USDT'),
-    exchangeId: z.string().describe('Exchange account ID (use list_exchanges to find)'),
+    exchange: z.string().describe('Exchange account ID (use list_exchanges to find)'),
     timeframe: z.string().default('1h').describe('Candle timeframe (e.g. 1h, 4h, 1d)'),
     period: z.enum(['1m', '3m', '6m', '1y']).default('3m'),
     initialBalance: z.number().default(10000),
-  }, withErrorHandling(async ({ strategyId, symbol, exchangeId, timeframe, period, initialBalance }) => {
+  }, withErrorHandling(async ({ strategyId, symbol, exchange: exchangeId, timeframe, period, initialBalance }) => {
     const now = new Date()
     const months: Record<string, number> = { '1m': 1, '3m': 3, '6m': 6, '1y': 12 }
     const startDate = new Date(now)
