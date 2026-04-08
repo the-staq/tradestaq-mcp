@@ -67,4 +67,26 @@ export function registerBacktestTools(server: McpServer) {
     }
     return { content: [{ type: 'text' as const, text: `Status: ${result.status || 'pending'}. Try again in a few seconds.` }] }
   }))
+
+  server.tool('export_backtest', 'Get export links for a completed backtest. Returns CSV and PDF download URLs.', {
+    id: z.string().describe('Backtest ID'),
+  }, withErrorHandling(async ({ id }) => {
+    const result = await api<any>(`/api/backtests/${id}`)
+    if (result.status !== 'completed' && !result.results) {
+      return { content: [{ type: 'text' as const, text: `Backtest ${id} is not completed yet (status: ${result.status || 'unknown'}). Wait for completion before exporting.` }] }
+    }
+    const r = result.results || result
+    return jsonResult({
+      id,
+      status: 'completed',
+      metrics: {
+        roi: r.roi, totalPnl: r.totalPnl, maxDrawdown: r.maxDrawdown,
+        winRate: r.winRate, sharpeRatio: r.sharpeRatio, totalTrades: r.totalTrades,
+      },
+      exportLinks: {
+        csv: `/api/backtests/${id}/export/csv`,
+        pdf: `/api/backtests/${id}/export/pdf`,
+      },
+    })
+  }))
 }
