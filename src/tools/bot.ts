@@ -64,6 +64,41 @@ export function registerBotTools(server: McpServer) {
     return { content: [{ type: 'text' as const, text: `Bot ${id} stopped. Open positions remain until manually closed.` }] }
   }))
 
+  server.tool('export_bot_trades', 'Export a bot\'s trade history as structured data. Returns all trades with PnL, entry/exit prices, and performance summary.', {
+    id: z.string().describe('Bot ID'),
+    format: z.enum(['summary', 'full']).default('summary').describe('summary = stats + recent trades, full = all trades'),
+  }, withErrorHandling(async ({ id, format }) => {
+    // Get bot details
+    const bot = await api<any>(`/api/bots/${id}`)
+    // Get trade history
+    const trades = await api<any>(`/api/trades/history?botId=${id}&limit=${format === 'full' ? 200 : 20}`)
+    const tradeList = trades.trades || trades || []
+
+    const result: any = {
+      bot: {
+        id: bot.id || bot._id,
+        name: bot.name,
+        symbol: bot.symbol,
+        status: bot.status,
+        isPaper: bot.paperTrading,
+      },
+      stats: bot.stats || {},
+      tradeCount: Array.isArray(tradeList) ? tradeList.length : 0,
+      trades: Array.isArray(tradeList) ? tradeList.map((t: any) => ({
+        symbol: t.symbol, side: t.side,
+        entryPrice: t.entryPrice, exitPrice: t.exitPrice,
+        pnl: t.pnl, size: t.size, leverage: t.leverage,
+        status: t.status, openedAt: t.openedAt, closedAt: t.closedAt,
+      })) : [],
+      exportLinks: {
+        csv: `/api/bots/${id}/export/csv`,
+        pdf: `/api/bots/${id}/export/pdf`,
+      },
+    }
+
+    return jsonResult(result)
+  }))
+
   server.tool('close_position', 'Close an open trading position. WARNING: This executes a market order to close your position.', {
     tradeId: z.string().describe('Trade/position ID to close'),
     exchangeId: z.string().describe('Exchange account ID where the position is open'),
