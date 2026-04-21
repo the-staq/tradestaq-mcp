@@ -71,6 +71,30 @@ if (mode === 'http') {
       return
     }
 
+    // OAuth 2.0 Protected Resource Metadata (RFC 9728).
+    // Spec-correct location — served from the resource's own origin, with
+    // `resource` matching the scanned origin + path. Points MCP clients at
+    // the authorization server on the TradeStaq web app so they can discover
+    // /authorize and /token via RFC 8414 /.well-known/oauth-authorization-server.
+    if (req.url === '/.well-known/oauth-protected-resource') {
+      const mcpUrl = process.env.MCP_PUBLIC_URL || 'https://mcp.tradestaq.com/mcp'
+      const authServer = process.env.TRADESTAQ_BASE_URL || 'https://www.tradestaq.com'
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'public, max-age=300, s-maxage=3600',
+      })
+      res.end(
+        JSON.stringify({
+          resource: mcpUrl,
+          authorization_servers: [authServer],
+          scopes_supported: ['mcp'],
+          bearer_methods_supported: ['header'],
+          resource_documentation: `${authServer}/docs/mcp/overview`,
+        }),
+      )
+      return
+    }
+
     // MCP endpoint
     if (req.url === '/mcp') {
       const sessionId = req.headers['mcp-session-id'] as string | undefined

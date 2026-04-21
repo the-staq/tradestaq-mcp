@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.2] - 2026-04-21
+
+### Added
+- **OAuth 2.0 Protected Resource Metadata** at `/.well-known/oauth-protected-resource` on the HTTP transport (RFC 9728). Served from the MCP server's own origin (`mcp.tradestaq.com`) as the spec recommends — strict MCP clients that follow the discovery procedure find this file directly at the resource URL instead of having to be told about a cross-origin pointer. Points MCP clients at the authorization server at `www.tradestaq.com` where `/authorize`, `/token`, and `/register` live.
+
 ## [0.1.1] - 2026-04-06
 
 ### Added
