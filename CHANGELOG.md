@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.1] - 2026-04-21
+
+### Changed
+- `authenticate` now registers a port-less loopback redirect URI (`http://127.0.0.1/callback`) once and caches the resulting `client_id` in `mcp-config.json` (scoped to `baseUrl`). Subsequent auth attempts reuse the cached registration instead of creating a new one each run, relying on the server's RFC 8252 §7.3 loopback exception to accept the actual port-specific callback at the authorize step.
+
 ## [0.2.0] - 2026-04-21
 
 ### Changed

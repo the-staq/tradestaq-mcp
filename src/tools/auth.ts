@@ -127,33 +127,47 @@ export function registerAuthTools(server: McpServer) {
 
         srv.listen(0, '127.0.0.1', async () => {
           const port = (srv.address() as { port: number }).port
-          callbackUrl = `http://localhost:${port}/callback`
+          // Actual callback URL with port — this is what the browser redirects to.
+          callbackUrl = `http://127.0.0.1:${port}/callback`
 
           try {
-            // RFC 7591 Dynamic Client Registration. We register a new client each
-            // run with our exact callback URL; redirect_uris must match exactly at
-            // the authorize step, and our port is random each invocation. This
-            // creates one OAuthClient document per auth attempt — a server-side
-            // RFC 8252 loopback exception would let us cache a single client_id.
-            const regRes = await fetch(`${config.baseUrl}/api/oauth/register`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                redirect_uris: [callbackUrl],
-                client_name: 'TradeStaq MCP Client',
-                grant_types: ['authorization_code'],
-                response_types: ['code'],
-                token_endpoint_auth_method: 'none',
-                scope: 'mcp',
-              }),
-            })
-            const regData = (await regRes.json()) as any
-            if (!regRes.ok || !regData.client_id) {
-              srv.close()
-              resolve({ isError: true, content: [{ type: 'text' as const, text: `Auth failed: client registration rejected (${regData.error || regRes.status})` }] })
-              return
+            // Register a port-less loopback redirect_uri ONCE and cache the
+            // client_id in mcp-config.json. Subsequent auths reuse the same
+            // client_id. The server matches our actual port-specific callback
+            // at the authorize step via the RFC 8252 §7.3 loopback exception.
+            const registeredRedirect = 'http://127.0.0.1/callback'
+            const cachedClientId =
+              config.oauthClientIdForBaseUrl === config.baseUrl ? config.oauthClientId : undefined
+
+            if (cachedClientId) {
+              clientId = cachedClientId
+            } else {
+              const regRes = await fetch(`${config.baseUrl}/api/oauth/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  redirect_uris: [registeredRedirect],
+                  client_name: 'TradeStaq MCP Client',
+                  grant_types: ['authorization_code'],
+                  response_types: ['code'],
+                  token_endpoint_auth_method: 'none',
+                  scope: 'mcp',
+                }),
+              })
+              const regData = (await regRes.json()) as any
+              if (!regRes.ok || !regData.client_id) {
+                srv.close()
+                resolve({ isError: true, content: [{ type: 'text' as const, text: `Auth failed: client registration rejected (${regData.error || regRes.status})` }] })
+                return
+              }
+              clientId = regData.client_id
+              // Cache for subsequent auths against the same baseUrl.
+              saveConfig({
+                ...config,
+                oauthClientId: regData.client_id,
+                oauthClientIdForBaseUrl: config.baseUrl,
+              })
             }
-            clientId = regData.client_id
 
             // RFC 6749 §3.1 — redirect-based authorization entrypoint.
             const authorizeUrl = new URL(`${config.baseUrl}/api/oauth/authorize`)

@@ -6,6 +6,10 @@ export interface McpConfig {
   token?: string
   baseUrl: string
   tokenExpiresAt?: number
+  // OAuth client_id from Dynamic Client Registration, cached across auth attempts.
+  // Keyed under baseUrl so switching environments gets a fresh registration.
+  oauthClientId?: string
+  oauthClientIdForBaseUrl?: string
 }
 
 const CONFIG_DIR = path.join(os.homedir(), '.tradestaq')
