@@ -65,6 +65,15 @@ export function registerAuthTools(server: McpServer) {
 
           const code = url.searchParams.get('code')
           const returnedState = url.searchParams.get('state')
+          const oauthError = url.searchParams.get('error')
+
+          if (oauthError) {
+            res.writeHead(400, { 'Content-Type': 'text/html' })
+            res.end(`<html><body><h2>Authentication denied</h2><p>${oauthError}</p></body></html>`)
+            srv.close()
+            resolve({ isError: true, content: [{ type: 'text' as const, text: `Auth denied: ${oauthError}` }] })
+            return
+          }
 
           if (returnedState !== state || !code) {
             res.writeHead(400, { 'Content-Type': 'text/html' })
@@ -75,14 +84,22 @@ export function registerAuthTools(server: McpServer) {
           }
 
           try {
-            const tokenRes = await fetch(`${config.baseUrl}/api/oauth/mcp/token`, {
+            // RFC 6749 §3.2 — token endpoint accepts application/x-www-form-urlencoded.
+            const body = new URLSearchParams({
+              grant_type: 'authorization_code',
+              code,
+              redirect_uri: callbackUrl,
+              client_id: clientId!,
+              code_verifier: codeVerifier,
+            })
+            const tokenRes = await fetch(`${config.baseUrl}/api/oauth/token`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ code, code_verifier: codeVerifier }),
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: body.toString(),
             })
             const tokenData = (await tokenRes.json()) as any
 
-            const token = tokenData.access_token || tokenData.token
+            const token = tokenData.access_token
             if (!tokenRes.ok || !token) {
               res.writeHead(400, { 'Content-Type': 'text/html' })
               res.end('<html><body><h2>Token exchange failed</h2><p>Please try again.</p></body></html>')
@@ -104,58 +121,68 @@ export function registerAuthTools(server: McpServer) {
           }
         })
 
-        srv.listen(0, '127.0.0.1', () => {
+        // Shared across callback handler via closure (assigned in listen callback below).
+        let clientId: string | null = null
+        let callbackUrl = ''
+
+        srv.listen(0, '127.0.0.1', async () => {
           const port = (srv.address() as { port: number }).port
-          const callbackUrl = `http://localhost:${port}/callback`
-          const authorizeUrl = `${config.baseUrl}/api/oauth/mcp/authorize?callback_url=${encodeURIComponent(callbackUrl)}&code_challenge=${codeChallenge}&state=${state}`
+          callbackUrl = `http://localhost:${port}/callback`
 
-          fetch(authorizeUrl).then(r => r.json() as Promise<any>).then(data => {
-            if (data.error) {
+          try {
+            // RFC 7591 Dynamic Client Registration. We register a new client each
+            // run with our exact callback URL; redirect_uris must match exactly at
+            // the authorize step, and our port is random each invocation. This
+            // creates one OAuthClient document per auth attempt — a server-side
+            // RFC 8252 loopback exception would let us cache a single client_id.
+            const regRes = await fetch(`${config.baseUrl}/api/oauth/register`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                redirect_uris: [callbackUrl],
+                client_name: 'TradeStaq MCP Client',
+                grant_types: ['authorization_code'],
+                response_types: ['code'],
+                token_endpoint_auth_method: 'none',
+                scope: 'mcp',
+              }),
+            })
+            const regData = (await regRes.json()) as any
+            if (!regRes.ok || !regData.client_id) {
               srv.close()
-              resolve({ isError: true, content: [{ type: 'text' as const, text: `Auth failed: ${data.error}` }] })
+              resolve({ isError: true, content: [{ type: 'text' as const, text: `Auth failed: client registration rejected (${regData.error || regRes.status})` }] })
               return
             }
+            clientId = regData.client_id
 
-            const loginUrl = data.loginUrl
-            if (!loginUrl) {
-              srv.close()
-              resolve({ isError: true, content: [{ type: 'text' as const, text: 'Auth failed: no login URL returned from server.' }] })
-              return
-            }
+            // RFC 6749 §3.1 — redirect-based authorization entrypoint.
+            const authorizeUrl = new URL(`${config.baseUrl}/api/oauth/authorize`)
+            authorizeUrl.searchParams.set('response_type', 'code')
+            authorizeUrl.searchParams.set('client_id', clientId!)
+            authorizeUrl.searchParams.set('redirect_uri', callbackUrl)
+            authorizeUrl.searchParams.set('scope', 'mcp')
+            authorizeUrl.searchParams.set('state', state)
+            authorizeUrl.searchParams.set('code_challenge', codeChallenge)
+            authorizeUrl.searchParams.set('code_challenge_method', 'S256')
 
-            // Validate URL
-            let parsedUrl: URL
-            try { parsedUrl = new URL(loginUrl) } catch {
-              srv.close()
-              resolve({ isError: true, content: [{ type: 'text' as const, text: 'Auth failed: server returned an invalid login URL.' }] })
-              return
-            }
-            if (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') {
-              srv.close()
-              resolve({ isError: true, content: [{ type: 'text' as const, text: 'Auth failed: server returned a non-HTTP login URL.' }] })
-              return
-            }
-
-            // Try to open browser (best effort)
+            // Try to open browser (best effort).
             const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open'
-            execFile(openCmd, [parsedUrl.href], () => {
-              // Ignore errors — the URL is also returned in the response
+            execFile(openCmd, [authorizeUrl.href], () => {
+              // Ignore errors — the URL is also returned in the notification below.
             })
 
-            // Send logging notification so the MCP client can show the URL
             extra.sendNotification({
               method: 'notifications/message' as any,
-              params: { level: 'info', data: `Open this URL to authenticate: ${parsedUrl.href}` },
+              params: { level: 'info', data: `Open this URL to authenticate: ${authorizeUrl.href}` },
             }).catch(() => {})
 
             // NOTE: Do NOT resolve here — wait for the OAuth callback or timeout.
-            // The tool stays "running" until the user completes login in the browser.
-          }).catch(err => {
+          } catch (err) {
             srv.close()
             resolve({ isError: true, content: [{ type: 'text' as const, text: `Failed to start auth: ${(err as Error).message}` }] })
-          })
+          }
 
-          // Timeout after 5 minutes
+          // Timeout after 5 minutes.
           setTimeout(() => {
             srv.close()
             resolve({ isError: true, content: [{ type: 'text' as const, text: 'Auth timed out after 5 minutes. Please try again.' }] })

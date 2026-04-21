@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0] - 2026-04-21
+
+### Changed
+- **`authenticate` tool now uses the standards-compliant OAuth 2.1 flow** against `/api/oauth/{register,authorize,token}` on the TradeStaq server instead of the custom `/api/oauth/mcp/*` endpoints. Behavior from the user's perspective is unchanged (still opens a browser, still saves a JWT), but under the hood the tool now:
+  1. POSTs to `/api/oauth/register` (RFC 7591 Dynamic Client Registration) with the local callback URL as `redirect_uris`, getting a `client_id`.
+  2. Opens `/api/oauth/authorize` directly in the browser (redirect-based, not JSON).
+  3. Exchanges the code at `/api/oauth/token` with `application/x-www-form-urlencoded` body and `grant_type=authorization_code` (RFC 6749 §3.2).
+- The old `/api/oauth/mcp/*` endpoints the TradeStaq server exposes are deprecated (sunset 2026-10-21). Upgrading to 0.2.0 is required to continue authenticating after that date.
+
+### Known limitation
+- Creates one `OAuthClient` document per auth attempt because `redirect_uris` must exactly match at the authorize step and the local callback port is random. A server-side RFC 8252 loopback exception would let the client cache a single `client_id` and reuse it — follow-up.
+
 ## [0.1.2] - 2026-04-21
 
 ### Added
