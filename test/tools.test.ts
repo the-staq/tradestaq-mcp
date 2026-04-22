@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { registerAuthTools } from '../src/tools/auth.js'
 import { registerMarketTools } from '../src/tools/market.js'
 import { registerPortfolioTools } from '../src/tools/portfolio.js'
 import { registerStrategyTools } from '../src/tools/strategy.js'
@@ -21,6 +22,11 @@ function createServer() {
 }
 
 describe('tool registration', () => {
+  it('registerAuthTools registers without error', () => {
+    const server = createServer()
+    expect(() => registerAuthTools(server)).not.toThrow()
+  })
+
   it('registerMarketTools registers without error', () => {
     const server = createServer()
     expect(() => registerMarketTools(server)).not.toThrow()

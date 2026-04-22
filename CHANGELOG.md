@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0] - 2026-04-22
+
+Ships the agent side of TradeStaq's scope-based MCP security (server half: mfanya-client v0.3.12.0). Agents can now pick a scope at auth time that matches the risk they're comfortable taking, spin up a paper exchange without touching the dashboard, and preflight tier capabilities + wallet balance before calling cost-charging tools.
+
+### Added
+- **`create_paper_exchange` tool** — spin up a paper-trading exchange from chat without any API keys. Defaults to $10,000 simulated USDT balance. Requires `mcp:paper` or `mcp:live` scope. This is the recommended first step for any first-time user or agent running on a paper-scoped token: create the paper exchange, then use its ID with `deploy_bot`, `list_strategies`, `create_strategy`, etc.
+- **`authenticate` now accepts a `scope` parameter** — pick `mcp:read` (view-only research agents), `mcp:paper` (paper trading, safe default — cannot touch live money), or `mcp:live` (full access including live-money deploys, live exchange connections, and wallet charges). Defaults to `mcp:paper` so agents err on the side of safety. Scopes are hierarchical: `mcp:live` implies `mcp:paper` implies `mcp:read`.
+- **`check_auth` preflight now returns scope + tier capabilities + Strategy Lab wallet balance** — agents can see at a glance: the OAuth client name, the scope on the current token, token expiry, whether the user's subscription tier allows live trading / AI Builder / news-based trading, and the Strategy Lab wallet balance for cost-charging tools like `generate_strategy`. Server-side cached per-token for 30s. Falls back to the old local-only check if the server endpoint is unavailable.
+
+### Changed
+- **`403 insufficient_scope` responses surface a clear re-authorize message** — when the server rejects a tool call because the token's scope is too narrow, the thrown `ApiError` now includes the required scope name and instructs the agent to ask the user to run `logout` then `authenticate` with the broader scope. Previous behavior returned a generic "403" error with no actionable guidance.
+
+### Server compatibility
+- Requires TradeStaq server (mfanya-client) **v0.3.12.0 or later** for the extended `check_auth` response and scope enforcement on write endpoints. Against older servers, `check_auth` automatically falls back to the local token-expiry check and other tools continue to work with `scope: "mcp"` back-compat (treated as `mcp:live` by the server).
+- Tokens minted by the deprecated `/api/oauth/mcp/token` endpoint are no longer accepted by the server (they bypassed scope enforcement). `authenticate` already uses the RFC-compliant `/api/oauth/token` flow since v0.2.0, so upgraded clients are unaffected — but if you have a stale `mcp-config.json` from before v0.2.0, run `logout` then `authenticate` to re-issue.
+
 ## [0.2.1] - 2026-04-21
 
 ### Changed

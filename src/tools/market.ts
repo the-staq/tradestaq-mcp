@@ -48,6 +48,37 @@ export function registerMarketTools(server: McpServer) {
     })))
   }))
 
+  server.tool(
+    'create_paper_exchange',
+    'Create a paper-trading exchange with a simulated balance. No API keys required. Paper exchanges let agents test strategies, deploy bots, and place trades without risking real money. Recommended starting point for first-time users and any scope=mcp:paper workflow.\n\nRequires OAuth scope mcp:paper or mcp:live. Session-cookie users (dashboard) can always call this.',
+    {
+      platform: z.string().describe('Exchange slug, e.g. "binance", "bybit", "okx", "hyperliquid". Use list_exchanges or the web docs for supported options.'),
+      exchangeType: z.enum(['spot', 'futures']).default('spot').describe('"spot" for cash trading, "futures" for leveraged/perps.'),
+      accountLabel: z.string().optional().describe('Friendly name shown in dashboard and bot configs, e.g. "BTC Paper Test". Defaults to platform name.'),
+      initialBalanceUsdt: z.number().positive().default(10000).describe('Simulated starting balance in USDT. Defaults to 10,000.'),
+    },
+    withErrorHandling(async ({ platform, exchangeType, accountLabel, initialBalanceUsdt }) => {
+      const body = {
+        name: platform.toLowerCase(),
+        exchangeType,
+        isPaper: true,
+        accountLabel: accountLabel || `${platform} Paper`,
+        initialBalances: { USDT: initialBalanceUsdt },
+      }
+      const data = await api<any>('/api/exchanges', { method: 'POST', body })
+      const ex = data.exchange || data
+      return jsonResult({
+        id: ex.id || ex._id,
+        platform: ex.name,
+        exchangeType: ex.exchangeType,
+        accountLabel: ex.accountLabel,
+        isPaper: true,
+        balanceUsdt: initialBalanceUsdt,
+        next: `Paper exchange created. Use list_strategies or deploy_bot with exchange: "${ex.id || ex._id}" to start paper-trading.`,
+      })
+    }),
+  )
+
   server.tool('search_markets', 'Search for trading pairs on a specific exchange. Use list_exchanges to find your exchange IDs.', {
     query: z.string().describe('Search query (e.g. "BTC", "ETH/USDT")'),
     exchange: z.string().describe('Filter by exchange'),

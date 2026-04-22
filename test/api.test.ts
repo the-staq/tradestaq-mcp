@@ -127,4 +127,39 @@ describe('api', () => {
       retryable: true,
     })
   })
+
+  it('maps 403 insufficient_scope to INSUFFICIENT_SCOPE with re-authorize guidance', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({
+        error: 'insufficient_scope',
+        error_description: 'This action requires mcp:live scope.',
+        scope: 'mcp:live',
+      }),
+    })
+
+    await expect(api('/api/bots', { method: 'POST', body: { foo: 1 } })).rejects.toMatchObject({
+      status: 403,
+      code: 'INSUFFICIENT_SCOPE',
+      retryable: false,
+    })
+    // Message should tell the caller what to do: re-authorize with mcp:live
+    await expect(api('/api/bots', { method: 'POST', body: { foo: 1 } })).rejects.toThrow(/mcp:live/)
+    await expect(api('/api/bots', { method: 'POST', body: { foo: 1 } })).rejects.toThrow(/authenticate/)
+  })
+
+  it('falls through to generic ApiError for 403 without insufficient_scope', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({ message: 'Tier limit exceeded' }),
+    })
+
+    await expect(api('/api/bots', { method: 'POST', body: {} })).rejects.toMatchObject({
+      status: 403,
+      code: 'HTTP_403',
+      message: 'Tier limit exceeded',
+    })
+  })
 })

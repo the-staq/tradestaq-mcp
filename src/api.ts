@@ -77,6 +77,19 @@ export async function api<T = unknown>(
     const data = (await res.json()) as any
 
     if (!res.ok) {
+      // OAuth insufficient_scope (RFC 6749 §5.2). Surface a clear, actionable
+      // message so the agent tells the user to re-authorize with a broader
+      // scope instead of retrying and hitting the same wall.
+      if (res.status === 403 && data?.error === 'insufficient_scope') {
+        const required = data?.scope || 'higher'
+        const desc = data?.error_description || 'This action requires a broader OAuth scope than the current token grants.'
+        throw new ApiError(
+          403,
+          'INSUFFICIENT_SCOPE',
+          `${desc} Required scope: ${required}. Ask the user to run \`logout\` then \`authenticate\` with scope: "${required}" to re-authorize.`,
+          false,
+        )
+      }
       throw new ApiError(
         res.status,
         data?.error?.code ?? `HTTP_${res.status}`,
