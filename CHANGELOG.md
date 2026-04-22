@@ -18,7 +18,7 @@ Pre-merge fixes from /review on PR #4. No public API changes. No server-side cha
 
 ## [0.3.0] - 2026-04-22
 
-Ships the agent side of TradeStaq's scope-based MCP security (server half: mfanya-client v0.3.12.0). Agents can now pick a scope at auth time that matches the risk they're comfortable taking, spin up a paper exchange without touching the dashboard, and preflight tier capabilities + wallet balance before calling cost-charging tools.
+Ships the agent side of TradeStaq's scope-based MCP security (server half: mfanya-client v0.3.13.0). Agents can now pick a scope at auth time that matches the risk they're comfortable taking, spin up a paper exchange without touching the dashboard, and preflight tier capabilities + wallet balance before calling cost-charging tools.
 
 ### Added
 - **`create_paper_exchange` tool** — spin up a paper-trading exchange from chat without any API keys. Defaults to $10,000 simulated USDT balance. Requires `mcp:paper` or `mcp:live` scope. This is the recommended first step for any first-time user or agent running on a paper-scoped token: create the paper exchange, then use its ID with `deploy_bot`, `list_strategies`, `create_strategy`, etc.
@@ -29,7 +29,7 @@ Ships the agent side of TradeStaq's scope-based MCP security (server half: mfany
 - **`403 insufficient_scope` responses surface a clear re-authorize message** — when the server rejects a tool call because the token's scope is too narrow, the thrown `ApiError` now includes the required scope name and instructs the agent to ask the user to run `logout` then `authenticate` with the broader scope. Previous behavior returned a generic "403" error with no actionable guidance.
 
 ### Server compatibility
-- Requires TradeStaq server (mfanya-client) **v0.3.12.0 or later** for the extended `check_auth` response and scope enforcement on write endpoints. Against older servers, `check_auth` automatically falls back to the local token-expiry check and other tools continue to work with `scope: "mcp"` back-compat (treated as `mcp:live` by the server).
+- Requires TradeStaq server (mfanya-client) **v0.3.13.0 or later** for the extended `check_auth` response and scope enforcement on write endpoints. Against older servers, `check_auth` automatically falls back to the local token-expiry check and other tools continue to work with `scope: "mcp"` back-compat (treated as `mcp:live` by the server).
 - Tokens minted by the deprecated `/api/oauth/mcp/token` endpoint are no longer accepted by the server (they bypassed scope enforcement). `authenticate` already uses the RFC-compliant `/api/oauth/token` flow since v0.2.0, so upgraded clients are unaffected — but if you have a stale `mcp-config.json` from before v0.2.0, run `logout` then `authenticate` to re-issue.
 
 ## [0.2.1] - 2026-04-21

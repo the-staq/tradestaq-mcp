@@ -308,7 +308,7 @@ export function registerAuthTools(server: McpServer) {
             }],
           }
         }
-        // Transient/pre-0.3.12.0 server: endpoint missing (404), network
+        // Transient/pre-0.3.13.0 server: endpoint missing (404), network
         // error, 5xx, or timeout. Fall back to the local token expiry check
         // as the best we can do.
         const config = loadConfig()
