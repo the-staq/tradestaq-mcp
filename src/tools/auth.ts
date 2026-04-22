@@ -60,11 +60,25 @@ export function registerAuthTools(server: McpServer) {
     'authenticate',
     'Log in to TradeStaq via browser. Opens a login page in your browser — you authenticate there and the token is saved automatically. No credentials enter the chat.\n\nScope controls what the agent can do: "mcp:read" (view-only research agents), "mcp:paper" (paper-trade bots, safe default — cannot touch live money), "mcp:live" (full access including live-money deploys, live exchange connections, and wallet charges). Scopes are hierarchical: live implies paper implies read. When in doubt, pick paper first — the server returns 403 insufficient_scope if the agent tries a live action, and the user can always re-authorize with a broader scope.',
     {
-      scope: z.enum(['mcp:read', 'mcp:paper', 'mcp:live']).default('mcp:paper').describe('OAuth scope to request. Default "mcp:paper" is the safe choice — the agent can create paper exchanges and deploy paper bots but cannot place live trades or charge the wallet.'),
+      scope: z
+        .string()
+        .regex(/^mcp(:[a-z-]+)?(\s+mcp(:[a-z-]+)?)*$/, 'Scope must be space-separated mcp:* tokens')
+        .default('mcp:paper')
+        .describe('OAuth scope to request. Known values today: "mcp:read" (view-only research agents), "mcp:paper" (paper-trade bots, safe default — cannot touch live money), "mcp:live" (full access including live-money deploys, live exchange connections, and wallet charges). The server may add newer scopes; this parameter is intentionally a string so forward-compat works without an npm bump.'),
     },
     async ({ scope }, extra) => {
       if (isAuthenticated()) {
-        return { content: [{ type: 'text' as const, text: 'Already authenticated. Use logout to switch accounts or re-authorize with a different scope.' }] }
+        // isError:true so MCP agents treat this as a branch that needs
+        // follow-up rather than a success. Otherwise an LLM trying to
+        // upgrade scope sees "Already authenticated" as completion and
+        // retries the scope-gated tool, which 403s again, and it loops.
+        return {
+          isError: true,
+          content: [{
+            type: 'text' as const,
+            text: `Already authenticated. To request scope "${scope}", the existing token must be cleared first — run \`logout\`, then call \`authenticate\` again with scope: "${scope}". Doing this implicitly would change the scope of access the user previously consented to.`,
+          }],
+        }
       }
 
       const config = loadConfig()
@@ -280,14 +294,30 @@ export function registerAuthTools(server: McpServer) {
 
         return { content: [{ type: 'text' as const, text: lines.join('\n') }] }
       } catch (err) {
-        // If the extended call fails (server pre-0.3.12.0 or transient), fall back to the local-only check.
+        // 401/403 mean the server actively rejected the token. Do NOT say
+        // "Authenticated" — the local token check says yes but the server
+        // disagrees, and the server is authoritative. Clear the stale token
+        // so subsequent tool calls don't keep hitting the same wall.
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          clearToken()
+          return {
+            isError: true,
+            content: [{
+              type: 'text' as const,
+              text: `Not authenticated. The server rejected the stored token (HTTP ${err.status}${err.code === 'INSUFFICIENT_SCOPE' ? ', insufficient_scope' : ''}). Run \`authenticate\` to sign in again.`,
+            }],
+          }
+        }
+        // Transient/pre-0.3.12.0 server: endpoint missing (404), network
+        // error, 5xx, or timeout. Fall back to the local token expiry check
+        // as the best we can do.
         const config = loadConfig()
         const hoursLeft = config.tokenExpiresAt ? Math.round((config.tokenExpiresAt - Date.now()) / 3600000) : 'unknown'
         const reason = err instanceof ApiError ? `${err.code}: ${err.message}` : (err as Error).message
         return {
           content: [{
             type: 'text' as const,
-            text: `Authenticated (local token check only — extended preflight failed: ${reason}). Token expires in ~${hoursLeft}h. API: ${config.baseUrl}`,
+            text: `Authenticated (local token check only — extended preflight unavailable: ${reason}). Token expires in ~${hoursLeft}h. API: ${config.baseUrl}`,
           }],
         }
       }

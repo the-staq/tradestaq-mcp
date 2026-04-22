@@ -66,15 +66,23 @@ export function registerMarketTools(server: McpServer) {
         initialBalances: { USDT: initialBalanceUsdt },
       }
       const data = await api<any>('/api/exchanges', { method: 'POST', body })
-      const ex = data.exchange || data
+      // Server returns { doc: <exchange> } (Payload convention). Fall back to
+      // bare-doc or { exchange: ... } for forward compatibility.
+      const ex = data?.doc || data?.exchange || data
+      const id = ex?.id || ex?._id
+      const persistedBalance = ex?.balances?.total?.USDT ?? ex?.initialBalances?.USDT
       return jsonResult({
-        id: ex.id || ex._id,
-        platform: ex.name,
-        exchangeType: ex.exchangeType,
-        accountLabel: ex.accountLabel,
+        id,
+        platform: ex?.name,
+        exchangeType: ex?.exchangeType,
+        accountLabel: ex?.accountLabel,
         isPaper: true,
-        balanceUsdt: initialBalanceUsdt,
-        next: `Paper exchange created. Use list_strategies or deploy_bot with exchange: "${ex.id || ex._id}" to start paper-trading.`,
+        // Report what the server actually persisted — server may clamp/override.
+        balanceUsdt: typeof persistedBalance === 'number' ? persistedBalance : initialBalanceUsdt,
+        balanceSource: typeof persistedBalance === 'number' ? 'server' : 'requested',
+        next: id
+          ? `Paper exchange created. Use list_strategies or deploy_bot with exchange: "${id}" to start paper-trading.`
+          : 'Paper exchange creation succeeded but the server response did not include an exchange ID. Call list_exchanges to find the new account.',
       })
     }),
   )
