@@ -3,7 +3,27 @@ import http from 'node:http'
 import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { loadConfig, saveConfig, clearToken, isAuthenticated } from '../config.js'
+import { api, ApiError } from '../api.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+
+interface CheckAuthResponse {
+  id: string
+  name: string
+  email: string
+  telegramLinked: boolean
+  tier: {
+    name: string | null
+    slug: string | null
+    capabilities?: Record<string, boolean | undefined>
+  } | null
+  strategyLabBalanceUsd?: number
+  token?: {
+    clientId: string
+    clientName: string
+    scope: string
+    expiresAt: string
+  }
+}
 
 export function registerAuthTools(server: McpServer) {
 
@@ -38,11 +58,27 @@ export function registerAuthTools(server: McpServer) {
 
   server.tool(
     'authenticate',
-    'Log in to TradeStaq via browser. Opens a login page in your browser — you authenticate there and the token is saved automatically. No credentials enter the chat.',
-    {},
-    async (_args, extra) => {
+    'Log in to TradeStaq via browser. Opens a login page in your browser — you authenticate there and the token is saved automatically. No credentials enter the chat.\n\nScope controls what the agent can do: "mcp:read" (view-only research agents), "mcp:paper" (paper-trade bots, safe default — cannot touch live money), "mcp:live" (full access including live-money deploys, live exchange connections, and wallet charges). Scopes are hierarchical: live implies paper implies read. When in doubt, pick paper first — the server returns 403 insufficient_scope if the agent tries a live action, and the user can always re-authorize with a broader scope.',
+    {
+      scope: z
+        .string()
+        .regex(/^mcp(:[a-z-]+)?(\s+mcp(:[a-z-]+)?)*$/, 'Scope must be space-separated mcp:* tokens')
+        .default('mcp:paper')
+        .describe('OAuth scope to request. Known values today: "mcp:read" (view-only research agents), "mcp:paper" (paper-trade bots, safe default — cannot touch live money), "mcp:live" (full access including live-money deploys, live exchange connections, and wallet charges). The server may add newer scopes; this parameter is intentionally a string so forward-compat works without an npm bump.'),
+    },
+    async ({ scope }, extra) => {
       if (isAuthenticated()) {
-        return { content: [{ type: 'text' as const, text: 'Already authenticated. Use logout to switch accounts.' }] }
+        // isError:true so MCP agents treat this as a branch that needs
+        // follow-up rather than a success. Otherwise an LLM trying to
+        // upgrade scope sees "Already authenticated" as completion and
+        // retries the scope-gated tool, which 403s again, and it loops.
+        return {
+          isError: true,
+          content: [{
+            type: 'text' as const,
+            text: `Already authenticated. To request scope "${scope}", the existing token must be cleared first — run \`logout\`, then call \`authenticate\` again with scope: "${scope}". Doing this implicitly would change the scope of access the user previously consented to.`,
+          }],
+        }
       }
 
       const config = loadConfig()
@@ -151,7 +187,7 @@ export function registerAuthTools(server: McpServer) {
                   grant_types: ['authorization_code'],
                   response_types: ['code'],
                   token_endpoint_auth_method: 'none',
-                  scope: 'mcp',
+                  scope,
                 }),
               })
               const regData = (await regRes.json()) as any
@@ -174,7 +210,7 @@ export function registerAuthTools(server: McpServer) {
             authorizeUrl.searchParams.set('response_type', 'code')
             authorizeUrl.searchParams.set('client_id', clientId!)
             authorizeUrl.searchParams.set('redirect_uri', callbackUrl)
-            authorizeUrl.searchParams.set('scope', 'mcp')
+            authorizeUrl.searchParams.set('scope', scope)
             authorizeUrl.searchParams.set('state', state)
             authorizeUrl.searchParams.set('code_challenge', codeChallenge)
             authorizeUrl.searchParams.set('code_challenge_method', 'S256')
@@ -206,14 +242,87 @@ export function registerAuthTools(server: McpServer) {
     },
   )
 
-  server.tool('check_auth', 'Check if you are authenticated with TradeStaq.', {}, async () => {
-    if (isAuthenticated()) {
-      const config = loadConfig()
-      const expiresIn = config.tokenExpiresAt ? Math.round((config.tokenExpiresAt - Date.now()) / 3600000) : 'unknown'
-      return { content: [{ type: 'text' as const, text: `Authenticated. Token expires in ~${expiresIn} hours.\nAPI: ${config.baseUrl}` }] }
-    }
-    return { content: [{ type: 'text' as const, text: 'Not authenticated. Use login (email/password) or authenticate (browser) to sign in.' }] }
-  })
+  server.tool(
+    'check_auth',
+    'Preflight check before invoking other tools. Returns the authenticated user, OAuth scope on the current token (mcp:read / mcp:paper / mcp:live), tier capabilities (allowLiveTrading, allowAIBuilder, allowNewsTrading, allowMcpServer), Strategy Lab wallet balance (for cost-charging tools like generate_strategy), and the OAuth client name/expiry. Agents should call this at the start of a workflow to pick the narrowest scope needed and to surface cost/balance to the user before committing to a charge. Response is cached server-side for 30s per token.',
+    {},
+    async () => {
+      if (!isAuthenticated()) {
+        return { content: [{ type: 'text' as const, text: 'Not authenticated. Use `authenticate` (browser OAuth, recommended — lets you pick a scope) or `login` (email/password) to sign in.' }] }
+      }
+      try {
+        const data = await api<CheckAuthResponse>('/api/v1/user/me')
+        const lines: string[] = []
+        lines.push(`Authenticated as ${data.name || data.email} (${data.email}).`)
+
+        if (data.token) {
+          const expiresAt = new Date(data.token.expiresAt)
+          const hoursLeft = Math.round((expiresAt.getTime() - Date.now()) / 3600000)
+          lines.push('')
+          lines.push(`OAuth client: ${data.token.clientName}`)
+          lines.push(`Scope: ${data.token.scope}`)
+          lines.push(`Expires: ${expiresAt.toISOString()} (~${hoursLeft}h)`)
+          const scopes = data.token.scope.split(/\s+/).filter(Boolean)
+          const hasLive = scopes.includes('mcp:live') || scopes.includes('mcp')
+          const hasPaper = hasLive || scopes.includes('mcp:paper')
+          lines.push(`Can trade live money: ${hasLive ? 'YES' : 'no (paper/read only)'}`)
+          lines.push(`Can create paper exchanges + deploy paper bots: ${hasPaper ? 'YES' : 'no (read only)'}`)
+        } else {
+          lines.push('Auth method: session cookie (dashboard). Full account access; no OAuth scope restrictions.')
+        }
+
+        if (data.tier) {
+          lines.push('')
+          lines.push(`Subscription tier: ${data.tier.name || data.tier.slug || 'unknown'}`)
+          if (data.tier.capabilities) {
+            const caps = data.tier.capabilities
+            const capLines = [
+              `  Live trading: ${caps.allowLiveTrading ? 'yes' : 'no'}`,
+              `  AI Strategy Builder: ${caps.allowAIBuilder ? 'yes' : 'no'}`,
+              `  News-based trading: ${caps.allowNewsTrading ? 'yes' : 'no'}`,
+              `  MCP server access: ${caps.allowMcpServer !== false ? 'yes' : 'no'}`,
+            ]
+            lines.push(...capLines)
+          }
+        }
+
+        if (typeof data.strategyLabBalanceUsd === 'number') {
+          lines.push('')
+          lines.push(`Strategy Lab wallet balance: $${data.strategyLabBalanceUsd.toFixed(2)} USD`)
+          lines.push('(generate_strategy charges $0.50/experiment; call with acknowledgeCost: true after confirming spend with the user.)')
+        }
+
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] }
+      } catch (err) {
+        // 401/403 mean the server actively rejected the token. Do NOT say
+        // "Authenticated" — the local token check says yes but the server
+        // disagrees, and the server is authoritative. Clear the stale token
+        // so subsequent tool calls don't keep hitting the same wall.
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          clearToken()
+          return {
+            isError: true,
+            content: [{
+              type: 'text' as const,
+              text: `Not authenticated. The server rejected the stored token (HTTP ${err.status}${err.code === 'INSUFFICIENT_SCOPE' ? ', insufficient_scope' : ''}). Run \`authenticate\` to sign in again.`,
+            }],
+          }
+        }
+        // Transient/pre-0.3.13.0 server: endpoint missing (404), network
+        // error, 5xx, or timeout. Fall back to the local token expiry check
+        // as the best we can do.
+        const config = loadConfig()
+        const hoursLeft = config.tokenExpiresAt ? Math.round((config.tokenExpiresAt - Date.now()) / 3600000) : 'unknown'
+        const reason = err instanceof ApiError ? `${err.code}: ${err.message}` : (err as Error).message
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Authenticated (local token check only — extended preflight unavailable: ${reason}). Token expires in ~${hoursLeft}h. API: ${config.baseUrl}`,
+          }],
+        }
+      }
+    },
+  )
 
   server.tool('set_token', 'Manually set a JWT token. For advanced use only.', {
     token: z.string().describe('JWT token from TradeStaq'),

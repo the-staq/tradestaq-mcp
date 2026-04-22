@@ -48,6 +48,45 @@ export function registerMarketTools(server: McpServer) {
     })))
   }))
 
+  server.tool(
+    'create_paper_exchange',
+    'Create a paper-trading exchange with a simulated balance. No API keys required. Paper exchanges let agents test strategies, deploy bots, and place trades without risking real money. Recommended starting point for first-time users and any scope=mcp:paper workflow.\n\nRequires OAuth scope mcp:paper or mcp:live. Session-cookie users (dashboard) can always call this.',
+    {
+      platform: z.string().describe('Exchange slug, e.g. "binance", "bybit", "okx", "hyperliquid". Use list_exchanges or the web docs for supported options.'),
+      exchangeType: z.enum(['spot', 'futures']).default('spot').describe('"spot" for cash trading, "futures" for leveraged/perps.'),
+      accountLabel: z.string().optional().describe('Friendly name shown in dashboard and bot configs, e.g. "BTC Paper Test". Defaults to platform name.'),
+      initialBalanceUsdt: z.number().positive().default(10000).describe('Simulated starting balance in USDT. Defaults to 10,000.'),
+    },
+    withErrorHandling(async ({ platform, exchangeType, accountLabel, initialBalanceUsdt }) => {
+      const body = {
+        name: platform.toLowerCase(),
+        exchangeType,
+        isPaper: true,
+        accountLabel: accountLabel || `${platform} Paper`,
+        initialBalances: { USDT: initialBalanceUsdt },
+      }
+      const data = await api<any>('/api/exchanges', { method: 'POST', body })
+      // Server returns { doc: <exchange> } (Payload convention). Fall back to
+      // bare-doc or { exchange: ... } for forward compatibility.
+      const ex = data?.doc || data?.exchange || data
+      const id = ex?.id || ex?._id
+      const persistedBalance = ex?.balances?.total?.USDT ?? ex?.initialBalances?.USDT
+      return jsonResult({
+        id,
+        platform: ex?.name,
+        exchangeType: ex?.exchangeType,
+        accountLabel: ex?.accountLabel,
+        isPaper: true,
+        // Report what the server actually persisted — server may clamp/override.
+        balanceUsdt: typeof persistedBalance === 'number' ? persistedBalance : initialBalanceUsdt,
+        balanceSource: typeof persistedBalance === 'number' ? 'server' : 'requested',
+        next: id
+          ? `Paper exchange created. Use list_strategies or deploy_bot with exchange: "${id}" to start paper-trading.`
+          : 'Paper exchange creation succeeded but the server response did not include an exchange ID. Call list_exchanges to find the new account.',
+      })
+    }),
+  )
+
   server.tool('search_markets', 'Search for trading pairs on a specific exchange. Use list_exchanges to find your exchange IDs.', {
     query: z.string().describe('Search query (e.g. "BTC", "ETH/USDT")'),
     exchange: z.string().describe('Filter by exchange'),

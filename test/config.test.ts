@@ -96,6 +96,27 @@ describe('clearToken', () => {
     expect(saved.tokenExpiresAt).toBeUndefined()
     expect(saved.baseUrl).toBe('https://custom.com')
   })
+
+  it('also clears cached oauthClientId so scope-upgrade re-auths work cleanly', async () => {
+    const { configModule, fs } = await freshImport()
+    const stored = {
+      token: 'abc',
+      baseUrl: 'https://tradestaq.com',
+      tokenExpiresAt: 123456,
+      oauthClientId: 'client_old_registered_with_paper_scope',
+      oauthClientIdForBaseUrl: 'https://tradestaq.com',
+    }
+    ;(fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(JSON.stringify(stored))
+
+    configModule.clearToken()
+
+    const writtenJson = (fs.writeFileSync as ReturnType<typeof vi.fn>).mock.calls[0][1]
+    const saved = JSON.parse(writtenJson)
+    expect(saved.oauthClientId).toBeUndefined()
+    expect(saved.oauthClientIdForBaseUrl).toBeUndefined()
+    // baseUrl is user-chosen config, must survive logout
+    expect(saved.baseUrl).toBe('https://tradestaq.com')
+  })
 })
 
 describe('isAuthenticated', () => {

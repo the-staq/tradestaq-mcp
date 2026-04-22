@@ -52,6 +52,13 @@ export function clearToken(): void {
   const config = loadConfig()
   delete config.token
   delete config.tokenExpiresAt
+  // Also drop the cached OAuth client_id. It was registered with whatever
+  // scope the last authenticate call used; a subsequent authenticate with
+  // a different scope should re-register cleanly rather than reuse a
+  // client_id bound to the old scope (some OAuth servers enforce the
+  // registered scope as an upper bound on authorize-time scope requests).
+  delete config.oauthClientId
+  delete config.oauthClientIdForBaseUrl
   saveConfig(config)
 }
 

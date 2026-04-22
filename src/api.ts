@@ -77,6 +77,23 @@ export async function api<T = unknown>(
     const data = (await res.json()) as any
 
     if (!res.ok) {
+      // OAuth insufficient_scope (RFC 6749 §5.2). The server-provided
+      // `scope` and `error_description` fields end up in LLM context
+      // verbatim, so treat them as untrusted: (1) only accept known scope
+      // tokens, (2) drop `error_description` entirely to avoid
+      // prompt-injection into the agent. Guidance to the agent is
+      // phrased as user-surface advice, not as imperative tool calls.
+      if (res.status === 403 && data?.error === 'insufficient_scope') {
+        const KNOWN = new Set(['mcp:read', 'mcp:paper', 'mcp:live', 'mcp'])
+        const rawScope = typeof data?.scope === 'string' ? data.scope.split(/\s+/).filter(Boolean) : []
+        const safeScope = rawScope.find((s: string) => KNOWN.has(s)) || 'a broader scope'
+        throw new ApiError(
+          403,
+          'INSUFFICIENT_SCOPE',
+          `This action requires ${safeScope === 'a broader scope' ? safeScope : `the '${safeScope}' OAuth scope`}. The current token does not grant it. Surface this to the user — do not re-authenticate without explicit user approval, since broader scopes expand what automated tools can do on their account.`,
+          false,
+        )
+      }
       throw new ApiError(
         res.status,
         data?.error?.code ?? `HTTP_${res.status}`,
