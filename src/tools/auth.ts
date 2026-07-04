@@ -29,11 +29,12 @@ export function registerAuthTools(server: McpServer) {
 
   server.tool(
     'login',
-    'Log in to TradeStaq with email and password.',
+    'Log in to TradeStaq with email and password and store the returned access token locally. Simple credential login for automation and headless use; for interactive users prefer authenticate (browser OAuth, where credentials never enter the chat). Credentials are sent directly to the TradeStaq API over HTTPS and are not persisted — only the returned token is saved.',
     {
-      email: z.string().describe('Your TradeStaq email address'),
-      password: z.string().describe('Your TradeStaq password'),
+      email: z.string().describe('The user\'s TradeStaq account email address.'),
+      password: z.string().describe('The user\'s TradeStaq password. Sent to the API over HTTPS; never stored.'),
     },
+    { title: 'Log In', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     async ({ email, password }) => {
       const config = loadConfig()
       try {
@@ -364,7 +365,7 @@ export function registerAuthTools(server: McpServer) {
     },
   )
 
-  server.tool('logout', 'Remove stored TradeStaq credentials.', {}, async () => {
+  server.tool('logout', 'Remove the stored TradeStaq credentials from local config (~/.tradestaq/mcp-config.json), signing the user out. Also clears the cached OAuth client so the next authenticate registers cleanly — call this before re-authenticating with a different scope.', {}, { title: 'Log Out', readOnlyHint: false, destructiveHint: false, idempotentHint: true }, async () => {
     clearToken()
     return { content: [{ type: 'text' as const, text: 'Logged out. Use login to sign in again.' }] }
   })

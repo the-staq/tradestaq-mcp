@@ -27,12 +27,13 @@ export function registerAdvisorTools(server: McpServer) {
 
   server.tool(
     'get_market_context',
-    'Get market context for a symbol: trend direction, volatility level, support/resistance levels.',
+    'Get a market read for a symbol: trend direction, volatility level, and key support/resistance levels. Use it to inform a strategy or trade decision, or to ground market commentary in current conditions. Read-only — never places orders. Get exchange IDs from list_exchanges.',
     {
-      symbol: z.string().describe('Trading pair (e.g. BTC/USDT)'),
-      timeframe: z.enum(['1h', '4h', '1d']).default('4h').describe('Candle timeframe'),
-      exchangeId: z.string().describe('Exchange account ID (use list_exchanges to find)'),
+      symbol: z.string().describe('Trading pair in BASE/QUOTE format, e.g. "BTC/USDT".'),
+      timeframe: z.enum(['1h', '4h', '1d']).default('4h').describe('Candle timeframe for the analysis: 1h, 4h, or 1d. Defaults to 4h.'),
+      exchangeId: z.string().describe('Exchange account ID to source data from (use list_exchanges to find one).'),
     },
+    { title: 'Get Market Context', readOnlyHint: true, openWorldHint: true },
     withErrorHandling(async ({ symbol, timeframe, exchangeId }) => {
       const params = new URLSearchParams({ symbol, timeframe, exchangeId })
       const data = await api<any>(`/api/market-context?${params}`)

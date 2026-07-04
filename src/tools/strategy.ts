@@ -5,9 +5,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 export function registerStrategyTools(server: McpServer) {
 
-  server.tool('list_strategies', 'List available trading strategies.', {
-    owned: z.boolean().default(false).describe('If true, only show your own strategies'),
-  }, withErrorHandling(async ({ owned }) => {
+  server.tool('list_strategies', 'List available trading strategies — either the public marketplace or the user\'s own library. Use it to discover strategies to backtest or deploy, or to find strategy IDs for get_strategy, compare_strategies, and deploy_bot. Read-only.', {
+    owned: z.boolean().default(false).describe('If true, return only the user\'s own strategies; if false (default), return the public marketplace catalog.'),
+  }, { title: 'List Strategies', readOnlyHint: true }, withErrorHandling(async ({ owned }) => {
     const endpoint = owned ? '/api/user-strategies' : '/api/tradedroid/strategies'
     const data = await api<any>(endpoint)
     const strategies = data.strategies || data.docs || []
@@ -17,9 +17,9 @@ export function registerStrategyTools(server: McpServer) {
     })))
   }))
 
-  server.tool('get_strategy', 'Get detailed info about a specific strategy.', {
-    id: z.string().describe('Strategy ID'),
-  }, withErrorHandling(async ({ id }) => {
+  server.tool('get_strategy', 'Get full details for a specific strategy by ID: description, market/timeframe, performance stats, rating, and code metadata. Use it to inspect a strategy before backtesting, deploying, or comparing. Read-only. Get IDs from list_strategies; use compare_strategies for side-by-side comparison and explain_strategy for a plain-English breakdown.', {
+    id: z.string().describe('The strategy ID to fetch, obtained from list_strategies.'),
+  }, { title: 'Get Strategy', readOnlyHint: true }, withErrorHandling(async ({ id }) => {
     const raw = await api<any>(`/api/tradedroid/strategies/${id}`)
     const s = raw.doc || raw
     const lv = s.latestVersion || {}
@@ -110,11 +110,11 @@ export function registerStrategyTools(server: McpServer) {
     return { content: [{ type: 'text' as const, text: `Strategy "${name}" created.\nID: ${data.id || data._id}\n\nBacktest it with what_if_backtest or deploy with deploy_bot.` }] }
   }))
 
-  server.tool('generate_strategy', 'Generate a trading strategy from a natural language description using AI. Describe what you want and AI creates the TradeDroid code.', {
-    description: z.string().describe('Natural language description of the strategy you want (e.g. "momentum strategy for ETH that buys on RSI oversold and sells on RSI overbought")'),
-    market: z.enum(['spot', 'futures']).default('futures'),
-    timeframe: z.string().default('1h').describe('Primary timeframe (e.g. 1h, 4h, 1d)'),
-  }, withErrorHandling(async ({ description, market, timeframe }) => {
+  server.tool('generate_strategy', 'Generate a complete trading strategy from a natural-language description using AI (FORGE). Describe the idea and it writes runnable TradeDroid strategy code — no coding required — then saves it so you can validate with what_if_backtest and deploy with deploy_bot. The fastest path from idea to a deployable strategy. Note: AI generation is a paid, cost-bearing operation and can take up to ~2 minutes.', {
+    description: z.string().describe('Natural-language description of the strategy, e.g. "momentum strategy for ETH that buys on RSI oversold and sells on RSI overbought with a 2% trailing stop".'),
+    market: z.enum(['spot', 'futures']).default('futures').describe('"spot" for cash trading or "futures" for leveraged/perpetual contracts. Defaults to futures.'),
+    timeframe: z.string().default('1h').describe('Primary candle timeframe the strategy runs on, e.g. "1h", "4h", "1d". Defaults to 1h.'),
+  }, { title: 'Generate Strategy (AI)', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, withErrorHandling(async ({ description, market, timeframe }) => {
     // The AI builder endpoint is a streaming endpoint, but for MCP we just need the final result
     // Call it as a regular POST and collect the response
     const data = await api<any>('/api/ai/strategy-builder', {

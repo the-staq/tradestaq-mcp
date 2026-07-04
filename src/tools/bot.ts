@@ -57,17 +57,17 @@ export function registerBotTools(server: McpServer) {
     }),
   )
 
-  server.tool('stop_bot', 'Stop a running trading bot. Open positions remain.', {
-    id: z.string().describe('Bot ID to stop'),
-  }, withErrorHandling(async ({ id }) => {
+  server.tool('stop_bot', 'Stop a running trading bot so it stops opening new positions. Any positions it currently holds stay open — close those separately with close_position. The bot and its config are kept and can be restarted later, so this is a reversible state change, not a delete. Check state first with get_bot_status; find bot IDs with list_bots.', {
+    id: z.string().describe('The bot ID to stop, obtained from list_bots.'),
+  }, { title: 'Stop Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: true }, withErrorHandling(async ({ id }) => {
     await api<any>(`/api/bots/${id}/status`, { method: 'PUT', body: { status: 'stopped' } })
     return { content: [{ type: 'text' as const, text: `Bot ${id} stopped. Open positions remain until manually closed.` }] }
   }))
 
-  server.tool('export_bot_trades', 'Export a bot\'s trade history as structured data. Returns all trades with PnL, entry/exit prices, and performance summary.', {
-    id: z.string().describe('Bot ID'),
-    format: z.enum(['summary', 'full']).default('summary').describe('summary = stats + recent trades, full = all trades'),
-  }, withErrorHandling(async ({ id, format }) => {
+  server.tool('export_bot_trades', 'Export a bot\'s trade history as structured data — every closed trade with entry/exit prices and P&L, plus a performance summary. Use it to review or report on how a specific bot has performed. Read-only. Get bot IDs from list_bots.', {
+    id: z.string().describe('The bot ID whose trades to export, obtained from list_bots.'),
+    format: z.enum(['summary', 'full']).default('summary').describe('"summary" = performance stats plus recent trades (default); "full" = every trade the bot has made.'),
+  }, { title: 'Export Bot Trades', readOnlyHint: true }, withErrorHandling(async ({ id, format }) => {
     // Get bot details
     const bot = await api<any>(`/api/bots/${id}`)
     // Get trade history
@@ -99,12 +99,12 @@ export function registerBotTools(server: McpServer) {
     return jsonResult(result)
   }))
 
-  server.tool('close_position', 'Close an open trading position. WARNING: This executes a market order to close your position.', {
-    tradeId: z.string().describe('Trade/position ID to close'),
-    exchangeId: z.string().describe('Exchange account ID where the position is open'),
-    symbol: z.string().describe('Trading pair (e.g. BTC/USDT)'),
-    percentage: z.number().min(1).max(100).default(100).describe('Percentage of position to close (100 = full close)'),
-  }, withErrorHandling(async ({ tradeId, exchangeId, symbol, percentage }) => {
+  server.tool('close_position', 'Close an open trading position by placing a market order — fully or partially. This moves real money when the position is live, so confirm intent with the user before calling. Find the tradeId, exchangeId, and symbol with get_positions. Set percentage below 100 for a partial close.', {
+    tradeId: z.string().describe('The trade/position ID to close, obtained from get_positions.'),
+    exchangeId: z.string().describe('The exchange account ID where the position is open, from get_positions or list_exchanges.'),
+    symbol: z.string().describe('Trading pair of the position, e.g. "BTC/USDT".'),
+    percentage: z.number().min(1).max(100).default(100).describe('Percentage of the position to close, 1-100. 100 = full close (default); e.g. 50 closes half.'),
+  }, { title: 'Close Position', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }, withErrorHandling(async ({ tradeId, exchangeId, symbol, percentage }) => {
     const data = await api<any>('/api/positions/close', {
       method: 'POST',
       body: { tradeId, exchangeId, symbol, size: String(percentage) },

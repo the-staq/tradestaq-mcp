@@ -5,10 +5,10 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 export function registerMarketTools(server: McpServer) {
 
-  server.tool('get_price', 'Get the current price of a trading pair (e.g. BTC/USDT).', {
-    symbol: z.string().describe('Trading pair (e.g. BTC/USDT)'),
-    exchange: z.string().optional().describe('Exchange name (e.g. binance, bybit)'),
-  }, withErrorHandling(async ({ symbol, exchange }) => {
+  server.tool('get_price', 'Get the current price of a trading pair, along with its 24h change and volume, from a connected exchange. Use it for a quick spot-price check or to confirm the market before sizing or placing a trade. Read-only — never places orders. For historical OHLCV data use get_candles.', {
+    symbol: z.string().describe('Trading pair in BASE/QUOTE format, e.g. "BTC/USDT" or "ETH/USDT".'),
+    exchange: z.string().optional().describe('Optional exchange account ID or platform name (e.g. "binance", "bybit") to price from. Omit to use the default connected exchange.'),
+  }, { title: 'Get Price', readOnlyHint: true, openWorldHint: true }, withErrorHandling(async ({ symbol, exchange }) => {
     const params = new URLSearchParams({ symbol })
     if (exchange) params.set('exchange', exchange)
     const data = await api<any>(`/api/trading/price?${params}`)

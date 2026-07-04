@@ -5,12 +5,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 export function registerTradeTools(server: McpServer) {
 
-  server.tool('get_trade_history', 'Get your closed trade history with PnL, entry/exit prices, and duration.', {
-    exchange: z.string().optional().describe('Filter by exchange name'),
-    symbol: z.string().optional().describe('Filter by trading pair symbol'),
-    limit: z.number().default(50).describe('Number of trades to return (max 200)'),
-    page: z.number().default(1).describe('Page number for pagination'),
-  }, withErrorHandling(async ({ exchange, symbol, limit, page }) => {
+  server.tool('get_trade_history', 'Get the user\'s closed trade history across exchanges — entry/exit prices, P&L, and holding duration per trade, with pagination. Use it to review past trades or answer questions about specific fills. Read-only. For aggregate metrics (ROI, win rate, Sortino) use get_performance_metrics instead.', {
+    exchange: z.string().optional().describe('Optional filter by exchange name, e.g. "binance". Omit for all exchanges.'),
+    symbol: z.string().optional().describe('Optional filter by trading pair, e.g. "BTC/USDT". Omit for all pairs.'),
+    limit: z.number().default(50).describe('Number of trades to return, max 200. Defaults to 50.'),
+    page: z.number().default(1).describe('Page number for pagination (1-based). Defaults to 1.'),
+  }, { title: 'Get Trade History', readOnlyHint: true }, withErrorHandling(async ({ exchange, symbol, limit, page }) => {
     const params = new URLSearchParams()
     if (exchange) params.set('exchange', exchange)
     if (symbol) params.set('symbol', symbol)
@@ -29,11 +29,11 @@ export function registerTradeTools(server: McpServer) {
     })))
   }))
 
-  server.tool('get_performance_metrics', 'Get trading performance metrics: ROI, win rate, PnL, Sortino ratio.', {
-    timeRange: z.enum(['today', '7d', '30d', '90d']).default('30d').describe('Time range for metrics'),
-    tradeType: z.enum(['live', 'paper']).optional().describe('Filter by trade type'),
-    exchangeId: z.string().optional().describe('Filter by exchange ID'),
-  }, withErrorHandling(async ({ timeRange, tradeType, exchangeId }) => {
+  server.tool('get_performance_metrics', 'Get aggregate trading performance metrics over a time range: ROI, win rate, total P&L, and Sortino ratio. Use it to summarize how the user (or a subset of their trading) is performing. Read-only. For a list of individual trades use get_trade_history.', {
+    timeRange: z.enum(['today', '7d', '30d', '90d']).default('30d').describe('Window for the metrics: today, 7d, 30d, or 90d. Defaults to 30d.'),
+    tradeType: z.enum(['live', 'paper']).optional().describe('Optional filter: "live" or "paper" trades only. Omit to include both.'),
+    exchangeId: z.string().optional().describe('Optional filter to a single exchange account ID (from list_exchanges). Omit for all.'),
+  }, { title: 'Get Performance Metrics', readOnlyHint: true }, withErrorHandling(async ({ timeRange, tradeType, exchangeId }) => {
     const params = new URLSearchParams()
     params.set('timeRange', timeRange)
     if (tradeType) params.set('tradeType', tradeType)
