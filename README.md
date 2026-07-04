@@ -3,6 +3,8 @@
 [![npm version](https://img.shields.io/npm/v/@the-staq/tradestaq-mcp)](https://www.npmjs.com/package/@the-staq/tradestaq-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
+**[Website](https://tradestaq.com)** · **[Docs](https://tradestaq.com/docs)** · **[MCP / AI Tools](https://tradestaq.com/mcp)** · **[Pricing](https://tradestaq.com/pricing)**
+
 **31 AI-powered trading tools for Claude, Cursor, and any MCP client.**
 
 Create strategies, backtest them, deploy trading bots, copy top traders, monitor positions, and manage your crypto portfolio, all from conversation. Supports Binance, Bybit, OKX, Bitget, Hyperliquid, dYdX, and more.
@@ -241,6 +243,14 @@ Error codes: `AUTH_EXPIRED`, `TIMEOUT`, `RATE_LIMITED`, `NETWORK_ERROR`, `HTTP_4
 - Token stored with 0600 file permissions
 - Localhost-only OAuth callbacks
 - `deploy_bot`, `stop_bot`, `close_position`, and `follow_trader` are destructive operations (AI confirms with user)
+
+## Links
+
+- **Website:** [tradestaq.com](https://tradestaq.com)
+- **Documentation:** [tradestaq.com/docs](https://tradestaq.com/docs)
+- **MCP & AI trading tools:** [tradestaq.com/mcp](https://tradestaq.com/mcp)
+- **Pricing:** [tradestaq.com/pricing](https://tradestaq.com/pricing)
+- **npm package:** [@the-staq/tradestaq-mcp](https://www.npmjs.com/package/@the-staq/tradestaq-mcp)
 
 ## License
 
