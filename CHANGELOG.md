@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.3] - 2026-07-04
+
+### Fixed
+- **Default API base URL now points at `https://www.tradestaq.com` (was `https://tradestaq.com`).** The apex domain 301-redirects all `/api/*` calls to `www`, and on POST requests Node's fetch drops the method and body when following a 301 — which could break `login`, `create_strategy`, `deploy_bot`, `create_paper_exchange`, `follow_trader`, and other write tools for anyone on the default base URL. Pointing directly at the canonical `www` host removes the redirect entirely. Users who set `TRADESTAQ_BASE_URL` or a stored `baseUrl` are unaffected.
+- Updated the "connect an exchange" hint URL in `list_exchanges` to the canonical `www` host.
+
 ## [0.3.2] - 2026-07-04
 
 Tool-definition quality pass. No behavior or API changes — this improves how tools present to MCP clients and quality scanners (e.g. Glama).

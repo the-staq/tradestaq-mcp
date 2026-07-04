@@ -28,7 +28,7 @@ describe('loadConfig', () => {
     })
 
     const config = configModule.loadConfig()
-    expect(config).toEqual({ baseUrl: 'https://tradestaq.com' })
+    expect(config).toEqual({ baseUrl: 'https://www.tradestaq.com' })
   })
 
   it('parses valid JSON file', async () => {
@@ -47,7 +47,7 @@ describe('loadConfig', () => {
     ;(fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue('not valid json{{{')
 
     const config = configModule.loadConfig()
-    expect(config).toEqual({ baseUrl: 'https://tradestaq.com' })
+    expect(config).toEqual({ baseUrl: 'https://www.tradestaq.com' })
   })
 
   it('returns cached value on second call (readFileSync called once)', async () => {

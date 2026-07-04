@@ -19,7 +19,7 @@ let _cache: McpConfig | null = null
 
 export function loadConfig(): McpConfig {
   if (_cache) return _cache
-  const defaults: McpConfig = { baseUrl: 'https://tradestaq.com' }
+  const defaults: McpConfig = { baseUrl: 'https://www.tradestaq.com' }
 
   // Environment variables override file config (useful for CI, Claude Code, etc.)
   const envToken = process.env.TRADESTAQ_TOKEN

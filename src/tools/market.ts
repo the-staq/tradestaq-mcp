@@ -38,7 +38,7 @@ export function registerMarketTools(server: McpServer) {
   server.tool('list_exchanges', 'List your connected exchange accounts with their IDs, platform names, and status.', {}, withErrorHandling(async () => {
     const data = await api<any>('/api/exchanges')
     const exchanges = data.exchanges || data.docs || []
-    if (!exchanges.length) return { content: [{ type: 'text' as const, text: 'No exchanges connected. Connect one at https://tradestaq.com/dashboard/exchanges' }] }
+    if (!exchanges.length) return { content: [{ type: 'text' as const, text: 'No exchanges connected. Connect one at https://www.tradestaq.com/dashboard/exchanges' }] }
     return jsonResult(exchanges.map((e: any) => ({
       id: e.id || e._id,
       name: e.name,
