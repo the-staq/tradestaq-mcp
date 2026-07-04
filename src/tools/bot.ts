@@ -16,9 +16,9 @@ export function registerBotTools(server: McpServer) {
     })))
   }))
 
-  server.tool('get_bot_status', 'Get detailed status and performance for a specific bot.', {
-    id: z.string().describe('Bot ID'),
-  }, withErrorHandling(async ({ id }) => {
+  server.tool('get_bot_status', 'Get detailed status, configuration, and live performance for a specific trading bot by ID. Returns its run status, the strategy/symbol/exchange it trades, whether it is paper or live, P&L, win rate, total trades, and risk config (leverage, stop-loss, take-profit). Use it to check how a deployed bot is doing. Read-only — to stop a bot use stop_bot. Get bot IDs from list_bots.', {
+    id: z.string().describe('The bot ID to inspect, obtained from list_bots.'),
+  }, { title: 'Get Bot Status', readOnlyHint: true }, withErrorHandling(async ({ id }) => {
     const data = await api<any>(`/api/bots/${id}`)
     return jsonResult({
       id: data.id || data._id, name: data.name, status: data.status,

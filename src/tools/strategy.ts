@@ -84,9 +84,9 @@ export function registerStrategyTools(server: McpServer) {
     return { content: [{ type: 'text' as const, text: lines.join('\n') }] }
   }))
 
-  server.tool('compare_strategies', 'Compare multiple strategies side by side on key metrics.', {
-    ids: z.array(z.string()).min(2).max(5).describe('Strategy IDs to compare'),
-  }, withErrorHandling(async ({ ids }) => {
+  server.tool('compare_strategies', 'Compare 2-5 strategies side by side on their key performance metrics: ROI, max drawdown, win rate, Sharpe ratio, rating, and active bot count. Use this to help a user choose between strategies from the marketplace or their own library before backtesting or deploying one. Read-only. Get strategy IDs from list_strategies.', {
+    ids: z.array(z.string()).min(2).max(5).describe('Array of 2-5 strategy IDs to compare, obtained from list_strategies or get_strategy.'),
+  }, { title: 'Compare Strategies', readOnlyHint: true }, withErrorHandling(async ({ ids }) => {
     const results = await Promise.all(ids.map((id: string) => api<any>(`/api/tradedroid/strategies/${id}`)))
     return jsonResult(results.map(raw => {
       const s = raw.doc || raw
@@ -99,13 +99,13 @@ export function registerStrategyTools(server: McpServer) {
     }))
   }))
 
-  server.tool('create_strategy', 'Create a new trading strategy from TradeDroid code.', {
-    name: z.string().describe('Strategy name'),
-    description: z.string().optional().describe('What the strategy does'),
-    code: z.string().describe('TradeDroid strategy code'),
-    market: z.enum(['spot', 'futures']).default('futures'),
-    timeframe: z.string().default('1h'),
-  }, withErrorHandling(async ({ name, description, code, market, timeframe }) => {
+  server.tool('create_strategy', 'Save a new trading strategy from existing TradeDroid strategy code to the user\'s library, so it can be backtested or deployed. Use this when you already have the code (hand-written or produced by generate_strategy). To create a strategy from a natural-language description instead of code, use generate_strategy. Returns the new strategy ID; validate it with what_if_backtest before deploying via deploy_bot.', {
+    name: z.string().describe('Display name for the strategy, e.g. "ETH Momentum v2".'),
+    description: z.string().optional().describe('Optional plain-English summary of what the strategy does and when it trades.'),
+    code: z.string().describe('TradeDroid strategy code (JavaScript) — the executable logic. Get it from generate_strategy or write it directly.'),
+    market: z.enum(['spot', 'futures']).default('futures').describe('"spot" for cash trading or "futures" for leveraged/perpetual contracts. Defaults to futures.'),
+    timeframe: z.string().default('1h').describe('Primary candle timeframe the strategy runs on, e.g. "1h", "4h", "1d". Defaults to 1h.'),
+  }, { title: 'Create Strategy', readOnlyHint: false, destructiveHint: false, idempotentHint: false }, withErrorHandling(async ({ name, description, code, market, timeframe }) => {
     const data = await api<any>('/api/user-strategies', { method: 'POST', body: { name, description, code, market, timeframe } })
     return { content: [{ type: 'text' as const, text: `Strategy "${name}" created.\nID: ${data.id || data._id}\n\nBacktest it with what_if_backtest or deploy with deploy_bot.` }] }
   }))

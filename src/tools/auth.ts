@@ -324,10 +324,10 @@ export function registerAuthTools(server: McpServer) {
     },
   )
 
-  server.tool('set_token', 'Manually set a JWT token. For advanced use only.', {
-    token: z.string().describe('JWT token from TradeStaq'),
-    baseUrl: z.string().optional().describe('API base URL (default: https://tradestaq.com)'),
-  }, async ({ token, baseUrl }) => {
+  server.tool('set_token', 'Manually store a TradeStaq JWT access token instead of logging in through the browser. Advanced / automation use only — most users should call authenticate (browser OAuth) or login (email + password) instead. The token is saved locally to ~/.tradestaq/mcp-config.json with an assumed 7-day expiry. Use this when you already hold a valid token, e.g. in CI or a headless environment.', {
+    token: z.string().describe('A valid TradeStaq JWT access token.'),
+    baseUrl: z.string().optional().describe('Optional API base URL override for self-hosted or staging servers. Defaults to the production TradeStaq API.'),
+  }, { title: 'Set Token', readOnlyHint: false, destructiveHint: false, idempotentHint: true }, async ({ token, baseUrl }) => {
     const config = loadConfig()
     saveConfig({
       ...config,
