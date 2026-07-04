@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.2] - 2026-07-04
+
+Tool-definition quality pass. No behavior or API changes — this improves how tools present to MCP clients and quality scanners (e.g. Glama).
+
+### Changed
+- **Enriched descriptions + parameters across 17 tools.** Each previously terse tool now has a multi-sentence description (what it does, when to use it, what it returns, related tools) and a `.describe()` on every parameter with examples, constraints, and enum meanings. Tools: `get_candles`, `get_price`, `compare_strategies`, `create_strategy`, `get_strategy`, `list_strategies`, `generate_strategy`, `get_bot_status`, `stop_bot`, `close_position`, `export_bot_trades`, `get_trade_history`, `get_performance_metrics`, `get_market_context`, `login`, `logout`, `set_token`.
+- **Added MCP tool annotations** (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) so clients can render and gate tools correctly — e.g. `close_position` is flagged destructive; read-only tools are flagged as such.
+
 ## [0.3.1] - 2026-04-22
 
 Pre-merge fixes from /review on PR #4. No public API changes. No server-side changes required.
