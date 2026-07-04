@@ -5,22 +5,22 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 export function registerMarketTools(server: McpServer) {
 
-  server.tool('get_price', 'Get the current price of a trading pair (e.g. BTC/USDT).', {
-    symbol: z.string().describe('Trading pair (e.g. BTC/USDT)'),
-    exchange: z.string().optional().describe('Exchange name (e.g. binance, bybit)'),
-  }, withErrorHandling(async ({ symbol, exchange }) => {
+  server.tool('get_price', 'Get the current price of a trading pair, along with its 24h change and volume, from a connected exchange. Use it for a quick spot-price check or to confirm the market before sizing or placing a trade. Read-only — never places orders. For historical OHLCV data use get_candles.', {
+    symbol: z.string().describe('Trading pair in BASE/QUOTE format, e.g. "BTC/USDT" or "ETH/USDT".'),
+    exchange: z.string().optional().describe('Optional exchange account ID or platform name (e.g. "binance", "bybit") to price from. Omit to use the default connected exchange.'),
+  }, { title: 'Get Price', readOnlyHint: true, openWorldHint: true }, withErrorHandling(async ({ symbol, exchange }) => {
     const params = new URLSearchParams({ symbol })
     if (exchange) params.set('exchange', exchange)
     const data = await api<any>(`/api/trading/price?${params}`)
     return jsonResult({ symbol: data.symbol, price: data.price, change24h: data.change24h, volume24h: data.volume24h })
   }))
 
-  server.tool('get_candles', 'Get OHLCV candlestick data for a trading pair.', {
-    symbol: z.string().describe('Trading pair (e.g. BTC/USDT)'),
-    timeframe: z.enum(['1m', '5m', '15m', '1h', '4h', '1d']).default('1h'),
-    limit: z.number().min(1).max(500).default(100),
-    exchange: z.string().optional(),
-  }, withErrorHandling(async ({ symbol, timeframe, limit, exchange }) => {
+  server.tool('get_candles', 'Fetch OHLCV (open/high/low/close/volume) candlestick data for a trading pair from a connected exchange. Use it to analyze price action, compute indicators, or ground a trading decision in real market data before backtesting or deploying a strategy. Returns the candles plus the latest candle and the high/low range over the window. Read-only — never places orders. Get exchange IDs from list_exchanges.', {
+    symbol: z.string().describe('Trading pair in BASE/QUOTE format, e.g. "BTC/USDT" or "ETH/USDT".'),
+    timeframe: z.enum(['1m', '5m', '15m', '1h', '4h', '1d']).default('1h').describe('Candle interval. One of 1m, 5m, 15m, 1h, 4h, 1d. Defaults to 1h.'),
+    limit: z.number().min(1).max(500).default(100).describe('Number of most-recent candles to return, 1-500. Defaults to 100.'),
+    exchange: z.string().optional().describe('Optional exchange account ID (from list_exchanges) to source candles from. Omit to use the default connected exchange.'),
+  }, { title: 'Get Candles', readOnlyHint: true, openWorldHint: true }, withErrorHandling(async ({ symbol, timeframe, limit, exchange }) => {
     const params = new URLSearchParams({ symbol, timeframe, limit: String(limit) })
     if (exchange) params.set('exchange', exchange)
     const data = await api<any>(`/api/charts/candles?${params}`)
