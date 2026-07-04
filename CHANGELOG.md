@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.4] - 2026-07-04
+
+### Added
+- **Automatic retry with backoff for transient failures.** API calls now retry up to 2 times on retryable errors (HTTP 429, 5xx, request timeouts, network errors), with exponential backoff (1s, 2s, capped at 8s) that honors a server `Retry-After` header when present. Previously the client only flagged errors as `retryable` and left the agent to retry manually. `ApiError` gained an optional `retryAfterMs` field, now surfaced through the tool error contract.
+
+### Fixed
+- **Non-JSON responses are classified correctly.** A gateway/proxy returning HTML or plain text (e.g. a 502 page) where JSON was expected is now reported as `HTTP_<status>` with a "non-JSON response" note, instead of a misleading `NETWORK_ERROR` from a JSON parse throw. A 2xx with an empty/non-JSON body returns an empty object rather than throwing.
+- **Internal error messages are length-capped** (300 chars) before being surfaced to the agent, so an unexpectedly large error string can't flood the model's context.
+
 ## [0.3.3] - 2026-07-04
 
 ### Fixed

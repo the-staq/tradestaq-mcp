@@ -197,4 +197,43 @@ describe('api', () => {
       message: 'Tier limit exceeded',
     })
   })
+
+  it('retries a transient 500 then succeeds', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({ error: { code: 'SERVER_ERROR', message: 'flaky' } }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: 1 }) })
+
+    const result = await api('/api/something')
+    expect(result).toEqual({ ok: 1 })
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('gives up after MAX_RETRIES (3 total attempts) on a persistent 500', async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 500, json: async () => ({ error: { code: 'SERVER_ERROR', message: 'down' } }) })
+
+    await expect(api('/api/something')).rejects.toMatchObject({ status: 500, retryable: true })
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('maps a non-JSON error body to HTTP_<status>, not NETWORK_ERROR', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => { throw new SyntaxError('Unexpected token < in JSON') },
+    })
+
+    await expect(api('/api/something')).rejects.toMatchObject({ status: 502, code: 'HTTP_502', retryable: true })
+    await expect(api('/api/something')).rejects.toThrow(/non-JSON/)
+  })
+
+  it('returns empty object on a 2xx with an empty/non-JSON body', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => { throw new SyntaxError('Unexpected end of JSON input') },
+    })
+
+    const result = await api('/api/something', { method: 'POST', body: {} })
+    expect(result).toEqual({})
+  })
 })

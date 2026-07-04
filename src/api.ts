@@ -6,10 +6,20 @@ export class ApiError extends Error {
     public code: string,
     message: string,
     public retryable: boolean = false,
+    public retryAfterMs?: number,
   ) {
     super(message)
     this.name = 'ApiError'
   }
+}
+
+const MAX_RETRIES = 2
+
+// Backoff between retries. Skipped under Vitest so the test suite stays fast
+// while production still waits out rate limits / transient 5xx.
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0 || process.env.VITEST) return Promise.resolve()
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 async function refreshTokenIfNeeded(): Promise<void> {
@@ -47,6 +57,17 @@ async function refreshTokenIfNeeded(): Promise<void> {
   }
 }
 
+// Parse a Retry-After header (integer seconds form) into milliseconds, capped.
+// Guarded so test mocks without a real Headers object don't blow up.
+function parseRetryAfter(res: Response): number | undefined {
+  const headers = res.headers
+  if (!headers || typeof headers.get !== 'function') return undefined
+  const raw = headers.get('retry-after')
+  if (!raw) return undefined
+  const secs = Number(raw)
+  return Number.isFinite(secs) && secs >= 0 ? Math.min(secs * 1000, 30_000) : undefined
+}
+
 export async function api<T = unknown>(
   path: string,
   options: { method?: string; body?: unknown; timeout?: number } = {},
@@ -59,57 +80,92 @@ export async function api<T = unknown>(
   await refreshTokenIfNeeded()
 
   const url = `${config.baseUrl}${path}`
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), options.timeout ?? 30_000)
+  let lastErr: ApiError | undefined
 
-  try {
-    const res = await fetch(url, {
-      method: options.method ?? 'GET',
-      headers: {
-        Authorization: `Bearer ${config.token}`,
-        'Content-Type': 'application/json',
-        'X-MCP-Source': 'tradestaq-mcp',
-      },
-      body: options.body ? JSON.stringify(options.body) : undefined,
-      signal: controller.signal,
-    })
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0 && lastErr) {
+      // Honor server Retry-After when present, else exponential backoff (1s, 2s) capped at 8s.
+      const backoff = lastErr.retryAfterMs ?? Math.min(1000 * 2 ** (attempt - 1), 8000)
+      await sleep(backoff)
+    }
 
-    const data = (await res.json()) as any
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), options.timeout ?? 30_000)
 
-    if (!res.ok) {
-      // OAuth insufficient_scope (RFC 6749 §5.2). The server-provided
-      // `scope` and `error_description` fields end up in LLM context
-      // verbatim, so treat them as untrusted: (1) only accept known scope
-      // tokens, (2) drop `error_description` entirely to avoid
-      // prompt-injection into the agent. Guidance to the agent is
-      // phrased as user-surface advice, not as imperative tool calls.
-      if (res.status === 403 && data?.error === 'insufficient_scope') {
-        const KNOWN = new Set(['mcp:read', 'mcp:paper', 'mcp:live', 'mcp'])
-        const rawScope = typeof data?.scope === 'string' ? data.scope.split(/\s+/).filter(Boolean) : []
-        const safeScope = rawScope.find((s: string) => KNOWN.has(s)) || 'a broader scope'
-        throw new ApiError(
-          403,
-          'INSUFFICIENT_SCOPE',
-          `This action requires ${safeScope === 'a broader scope' ? safeScope : `the '${safeScope}' OAuth scope`}. The current token does not grant it. Surface this to the user — do not re-authenticate without explicit user approval, since broader scopes expand what automated tools can do on their account.`,
-          false,
-        )
+    try {
+      const res = await fetch(url, {
+        method: options.method ?? 'GET',
+        headers: {
+          Authorization: `Bearer ${config.token}`,
+          'Content-Type': 'application/json',
+          'X-MCP-Source': 'tradestaq-mcp',
+        },
+        body: options.body ? JSON.stringify(options.body) : undefined,
+        signal: controller.signal,
+      })
+
+      // Parse the body defensively. A proxy or gateway can return HTML/text
+      // (e.g. a 502 page) where we expect JSON; never let a parse failure
+      // bubble up mislabeled as a NETWORK_ERROR.
+      let data: any = {}
+      let parseOk = true
+      try {
+        data = await res.json()
+      } catch {
+        parseOk = false
       }
-      throw new ApiError(
-        res.status,
-        data?.error?.code ?? `HTTP_${res.status}`,
-        data?.error?.message ?? data?.error ?? data?.message ?? `API returned ${res.status}`,
-        res.status === 429 || res.status >= 500,
-      )
-    }
 
-    return data as T
-  } catch (err) {
-    if (err instanceof ApiError) throw err
-    if ((err as Error).name === 'AbortError') {
-      throw new ApiError(408, 'TIMEOUT', 'Request timed out', true)
+      if (!res.ok) {
+        const retryable = res.status === 429 || res.status >= 500
+        const retryAfterMs = retryable ? parseRetryAfter(res) : undefined
+
+        // OAuth insufficient_scope (RFC 6749 §5.2). The server-provided
+        // `scope` and `error_description` fields end up in LLM context
+        // verbatim, so treat them as untrusted: (1) only accept known scope
+        // tokens, (2) drop `error_description` entirely to avoid
+        // prompt-injection into the agent. Guidance to the agent is
+        // phrased as user-surface advice, not as imperative tool calls.
+        if (res.status === 403 && parseOk && data?.error === 'insufficient_scope') {
+          const KNOWN = new Set(['mcp:read', 'mcp:paper', 'mcp:live', 'mcp'])
+          const rawScope = typeof data?.scope === 'string' ? data.scope.split(/\s+/).filter(Boolean) : []
+          const safeScope = rawScope.find((s: string) => KNOWN.has(s)) || 'a broader scope'
+          throw new ApiError(
+            403,
+            'INSUFFICIENT_SCOPE',
+            `This action requires ${safeScope === 'a broader scope' ? safeScope : `the '${safeScope}' OAuth scope`}. The current token does not grant it. Surface this to the user — do not re-authenticate without explicit user approval, since broader scopes expand what automated tools can do on their account.`,
+            false,
+          )
+        }
+
+        const code = parseOk ? (data?.error?.code ?? `HTTP_${res.status}`) : `HTTP_${res.status}`
+        const message = parseOk
+          ? (data?.error?.message ?? data?.error ?? data?.message ?? `API returned ${res.status}`)
+          : `API returned ${res.status} with a non-JSON response`
+        throw new ApiError(res.status, code, message, retryable, retryAfterMs)
+      }
+
+      // 2xx with an unparseable body: treat empty/no-content as an empty
+      // object (common for write endpoints); the caller reads fields defensively.
+      return (parseOk ? data : {}) as T
+    } catch (err) {
+      const apiErr =
+        err instanceof ApiError
+          ? err
+          : (err as Error).name === 'AbortError'
+            ? new ApiError(408, 'TIMEOUT', 'Request timed out', true)
+            : new ApiError(0, 'NETWORK_ERROR', `Failed to reach TradeStaq API: ${(err as Error).message}`, true)
+
+      // Retry transient failures (429 / 5xx / timeout / network) with backoff.
+      if (apiErr.retryable && attempt < MAX_RETRIES) {
+        lastErr = apiErr
+        continue
+      }
+      throw apiErr
+    } finally {
+      clearTimeout(timer)
     }
-    throw new ApiError(0, 'NETWORK_ERROR', `Failed to reach TradeStaq API: ${(err as Error).message}`, true)
-  } finally {
-    clearTimeout(timer)
   }
+
+  // Retries exhausted.
+  throw lastErr ?? new ApiError(0, 'NETWORK_ERROR', 'Request failed after retries', true)
 }
