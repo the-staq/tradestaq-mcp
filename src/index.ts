@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { requestContext } from './request-context.js'
 import { registerAuthTools } from './tools/auth.js'
 import { registerMarketTools } from './tools/market.js'
 import { registerPortfolioTools } from './tools/portfolio.js'
@@ -26,13 +27,13 @@ const version = fs.readFileSync(path.join(__dirname, '..', 'VERSION'), 'utf-8').
 const mode = process.argv.includes('--http') ? 'http' : 'stdio'
 const port = parseInt(process.env.MCP_PORT || '3100', 10)
 
-function createServer(): McpServer {
+function createServer(transport: 'http' | 'stdio'): McpServer {
   const server = new McpServer(
     { name: 'tradestaq', version },
     { capabilities: { logging: {} } },
   )
 
-  registerAuthTools(server)
+  registerAuthTools(server, transport)
   registerMarketTools(server)
   registerPortfolioTools(server)
   registerStrategyTools(server)
@@ -99,12 +100,21 @@ if (mode === 'http') {
     if (req.url === '/mcp') {
       const sessionId = req.headers['mcp-session-id'] as string | undefined
 
+      // Per-request bearer for hosted auth. Every /mcp request runs inside a
+      // requestContext store (even unauthenticated, with token undefined) so
+      // tools/api() use THIS request's token and never the shared file token.
+      const _authz = req.headers['authorization']
+      const bearer =
+        typeof _authz === 'string' && _authz.toLowerCase().startsWith('bearer ')
+          ? _authz.slice(7).trim()
+          : undefined
+
       if (req.method === 'POST' && !sessionId) {
         // New session — create server + transport
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
         })
-        const server = createServer()
+        const server = createServer('http')
         await server.connect(transport)
 
         transport.onclose = () => {
@@ -112,7 +122,7 @@ if (mode === 'http') {
           if (sid) sessions.delete(sid)
         }
 
-        await transport.handleRequest(req, res)
+        await requestContext.run({ token: bearer }, () => transport.handleRequest(req, res))
 
         if (transport.sessionId) {
           sessions.set(transport.sessionId, { server, transport })
@@ -123,7 +133,7 @@ if (mode === 'http') {
       if (sessionId && sessions.has(sessionId)) {
         // Existing session
         const session = sessions.get(sessionId)!
-        await session.transport.handleRequest(req, res)
+        await requestContext.run({ token: bearer }, () => session.transport.handleRequest(req, res))
         return
       }
 
@@ -144,7 +154,7 @@ if (mode === 'http') {
   })
 } else {
   // stdio transport — local process (Claude Desktop, Cursor, Claude Code)
-  const server = createServer()
+  const server = createServer('stdio')
   const transport = new StdioServerTransport()
   await server.connect(transport)
 }

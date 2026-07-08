@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.5] - 2026-07-08
+
+### Fixed
+- **`authenticate` no longer fails with "Unexpected end of JSON input".** The OAuth flow parsed response bodies (dynamic client registration, token exchange) and the `login` response with a bare `res.json()`, so any empty or non-JSON body from a proxy/CDN (a Cloudflare 5xx, gateway timeout, or 204) threw an opaque parse error surfaced as `Failed to start auth: Unexpected end of JSON input`. Bodies are now read defensively and the failure reports the HTTP status plus whether the body was empty or non-JSON.
+- **`authenticate` fails fast on hosted (HTTP) transport instead of attempting an unreachable browser login.** The tool's loopback callback server and browser launch only work when the server runs on the user's own machine (stdio). On a hosted server (`--http`, e.g. `mcp.tradestaq.com`) those run server-side and never reach a remote user. The tool now detects HTTP transport and returns guidance to authenticate at the connector level via the advertised `/.well-known/oauth-protected-resource` metadata.
+- **Hosted (HTTP) sessions no longer share one process-global token.** `api()` now resolves the token from each request's `Authorization` bearer in HTTP mode and never falls back to the shared config-file token, so concurrent sessions in one hosted process can't borrow each other's authentication. `login`, `set_token`, `logout`, and `connect_exchange` refuse in HTTP mode (they manage a local machine-wide credential or open a server-side browser) and point to connector-level bearer auth; `check_auth` reflects the per-request token. Stdio (local) installs are unchanged — they still use the local config token.
+
+### Changed
+- OAuth/login error messages no longer echo the raw response body into agent-visible text (avoids surfacing untrusted proxy content into model context); the HTTP status and empty-vs-non-JSON distinction are reported instead.
+
+### Security
+- **Dependency advisories patched** via non-breaking updates (`npm audit fix`, no `package.json` range changes): resolved the critical vitest UI file-read/exec advisory, the high-severity vite path-traversal and express-rate-limit/ip-address advisories, and the qs DoS. One low-severity dev-only esbuild advisory remains (requires a major bump; deferred).
+
 ## [0.3.4] - 2026-07-04
 
 ### Added

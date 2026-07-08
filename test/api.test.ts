@@ -12,6 +12,7 @@ vi.mock('../src/config.js', () => ({
 vi.stubGlobal('fetch', mockFetch)
 
 import { api, ApiError } from '../src/api.js'
+import { requestContext } from '../src/request-context.js'
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -235,5 +236,33 @@ describe('api', () => {
 
     const result = await api('/api/something', { method: 'POST', body: {} })
     expect(result).toEqual({})
+  })
+})
+
+describe('api request-context (hosted per-request token)', () => {
+  it('uses the per-request bearer instead of the shared config token', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ ok: 1 }) })
+
+    await requestContext.run({ token: 'req-tok' }, async () => {
+      await api('/api/whoami')
+    })
+
+    const [, opts] = mockFetch.mock.calls[0]
+    // config still holds 'test-token', but the request bearer must win
+    expect(opts.headers.Authorization).toBe('Bearer req-tok')
+  })
+
+  it('does NOT fall back to the shared config token when the request has none (bleed defense)', async () => {
+    // A hosted request with no bearer must be unauthenticated, even though the
+    // shared config file still holds 'test-token' — otherwise one session would
+    // borrow another user's credential.
+    let thrown: unknown
+    await requestContext.run({ token: undefined }, async () => {
+      try { await api('/api/whoami') } catch (e) { thrown = e }
+    })
+
+    expect(thrown).toBeInstanceOf(ApiError)
+    expect(thrown).toMatchObject({ code: 'AUTH_EXPIRED', status: 401 })
+    expect(mockFetch).not.toHaveBeenCalled()
   })
 })
