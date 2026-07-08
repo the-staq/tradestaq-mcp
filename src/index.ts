@@ -26,13 +26,13 @@ const version = fs.readFileSync(path.join(__dirname, '..', 'VERSION'), 'utf-8').
 const mode = process.argv.includes('--http') ? 'http' : 'stdio'
 const port = parseInt(process.env.MCP_PORT || '3100', 10)
 
-function createServer(): McpServer {
+function createServer(transport: 'http' | 'stdio'): McpServer {
   const server = new McpServer(
     { name: 'tradestaq', version },
     { capabilities: { logging: {} } },
   )
 
-  registerAuthTools(server)
+  registerAuthTools(server, transport)
   registerMarketTools(server)
   registerPortfolioTools(server)
   registerStrategyTools(server)
@@ -104,7 +104,7 @@ if (mode === 'http') {
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
         })
-        const server = createServer()
+        const server = createServer('http')
         await server.connect(transport)
 
         transport.onclose = () => {
@@ -144,7 +144,7 @@ if (mode === 'http') {
   })
 } else {
   // stdio transport — local process (Claude Desktop, Cursor, Claude Code)
-  const server = createServer()
+  const server = createServer('stdio')
   const transport = new StdioServerTransport()
   await server.connect(transport)
 }

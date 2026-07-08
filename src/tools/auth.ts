@@ -25,7 +25,24 @@ interface CheckAuthResponse {
   }
 }
 
-export function registerAuthTools(server: McpServer) {
+/**
+ * Read a fetch Response body defensively. OAuth endpoints can sit behind a
+ * CDN/proxy (Cloudflare here) that returns an empty or non-JSON body on a 5xx,
+ * gateway timeout, or 204. A bare `res.json()` on an empty body throws the
+ * opaque "Unexpected end of JSON input"; this surfaces the HTTP status and a
+ * body snippet instead so the failure is diagnosable.
+ */
+async function readOAuthJson(res: Response): Promise<{ data: any; parseOk: boolean; raw: string }> {
+  const raw = await res.text().catch(() => '')
+  if (!raw) return { data: {}, parseOk: false, raw: '' }
+  try {
+    return { data: JSON.parse(raw), parseOk: true, raw }
+  } catch {
+    return { data: {}, parseOk: false, raw }
+  }
+}
+
+export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio' = 'stdio') {
 
   server.tool(
     'login',
@@ -43,9 +60,11 @@ export function registerAuthTools(server: McpServer) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password }),
         })
-        const data = (await res.json()) as any
+        const { data, parseOk, raw } = await readOAuthJson(res)
         if (!res.ok || !data.token) {
-          const msg = data.errors?.[0]?.message || data.message || 'Login failed'
+          const msg = parseOk
+            ? (data.errors?.[0]?.message || data.message || 'Login failed')
+            : (raw ? `HTTP ${res.status} (non-JSON response)` : `HTTP ${res.status} with an empty response body`)
           return { isError: true, content: [{ type: 'text' as const, text: `Login failed: ${msg}` }] }
         }
         saveConfig({ ...config, token: data.token, tokenExpiresAt: Date.now() + 7 * 24 * 3600 * 1000 })
@@ -68,6 +87,22 @@ export function registerAuthTools(server: McpServer) {
         .describe('OAuth scope to request. Known values today: "mcp:read" (view-only research agents), "mcp:paper" (paper-trade bots, safe default — cannot touch live money), "mcp:live" (full access including live-money deploys, live exchange connections, and wallet charges). The server may add newer scopes; this parameter is intentionally a string so forward-compat works without an npm bump.'),
     },
     async ({ scope }, extra) => {
+      // Hosted (HTTP) transport: the loopback callback server and `open`
+      // browser launch below would run on the SERVER, not the user's machine,
+      // so this tool can never complete a browser login remotely. Remote
+      // clients authenticate at the connector level via the OAuth metadata this
+      // server advertises at /.well-known/oauth-protected-resource. Fail fast
+      // with guidance instead of spinning up an unreachable loopback listener.
+      if (transport === 'http') {
+        return {
+          isError: true,
+          content: [{
+            type: 'text' as const,
+            text: `This is a hosted TradeStaq MCP server, so the browser-OAuth "authenticate" tool does not apply — its loopback + browser step runs on the server, not your machine. Authenticate at the connector level instead: your MCP client discovers the OAuth flow from this server's /.well-known/oauth-protected-resource and attaches a bearer token automatically (authorize the TradeStaq connector in your client's settings). The "authenticate" tool only works for local (stdio) installs. If your client cannot perform connector OAuth, use "login" with email and password as a fallback.`,
+          }],
+        }
+      }
+
       if (isAuthenticated()) {
         // isError:true so MCP agents treat this as a branch that needs
         // follow-up rather than a success. Otherwise an LLM trying to
@@ -134,14 +169,19 @@ export function registerAuthTools(server: McpServer) {
               headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
               body: body.toString(),
             })
-            const tokenData = (await tokenRes.json()) as any
+            const { data: tokenData, parseOk: tokParseOk, raw: tokRaw } = await readOAuthJson(tokenRes)
 
             const token = tokenData.access_token
             if (!tokenRes.ok || !token) {
               res.writeHead(400, { 'Content-Type': 'text/html' })
               res.end('<html><body><h2>Token exchange failed</h2><p>Please try again.</p></body></html>')
               srv.close()
-              resolve({ isError: true, content: [{ type: 'text' as const, text: `Auth failed: ${tokenData.error || 'no token in response'}` }] })
+              const detail = tokParseOk
+                ? (tokenData.error_description || tokenData.error || 'no token in response')
+                : (tokRaw
+                    ? `token endpoint returned HTTP ${tokenRes.status} with a non-JSON body`
+                    : `token endpoint returned HTTP ${tokenRes.status} with an empty body`)
+              resolve({ isError: true, content: [{ type: 'text' as const, text: `Auth failed: ${detail}` }] })
               return
             }
 
@@ -191,10 +231,15 @@ export function registerAuthTools(server: McpServer) {
                   scope,
                 }),
               })
-              const regData = (await regRes.json()) as any
+              const { data: regData, parseOk: regParseOk, raw: regRaw } = await readOAuthJson(regRes)
               if (!regRes.ok || !regData.client_id) {
+                const detail = regParseOk
+                  ? (regData.error_description || regData.error || `HTTP ${regRes.status}`)
+                  : (regRaw
+                      ? `HTTP ${regRes.status} with a non-JSON response body`
+                      : `HTTP ${regRes.status} with an empty response body`)
                 srv.close()
-                resolve({ isError: true, content: [{ type: 'text' as const, text: `Auth failed: client registration rejected (${regData.error || regRes.status})` }] })
+                resolve({ isError: true, content: [{ type: 'text' as const, text: `Auth failed: OAuth client registration at ${config.baseUrl}/api/oauth/register was rejected (${detail}).` }] })
                 return
               }
               clientId = regData.client_id
