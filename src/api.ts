@@ -1,4 +1,5 @@
 import { loadConfig, saveConfig } from './config.js'
+import { requestContext } from './request-context.js'
 
 export class ApiError extends Error {
   constructor(
@@ -23,6 +24,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function refreshTokenIfNeeded(): Promise<void> {
+  // Hosted (per-request bearer) sessions never refresh or write the shared file
+  // token — that bearer is owned by the client connector's OAuth flow, and
+  // writing it to the shared config would leak it across sessions.
+  if (requestContext.getStore()) return
   const config = loadConfig()
   if (!config.token || !config.tokenExpiresAt) return
 
@@ -72,9 +77,16 @@ export async function api<T = unknown>(
   path: string,
   options: { method?: string; body?: unknown; timeout?: number } = {},
 ): Promise<T> {
+  const store = requestContext.getStore()
   const config = loadConfig()
-  if (!config.token) {
-    throw new ApiError(401, 'AUTH_EXPIRED', 'Not authenticated. Run the authenticate tool first.')
+  // Hosted mode (store present): use THIS request's bearer only — never fall
+  // back to the shared file token, or one session would borrow another's auth.
+  // Stdio mode (no store): the file token, exactly as before.
+  const token = store ? store.token : config.token
+  if (!token) {
+    throw new ApiError(401, 'AUTH_EXPIRED', store
+      ? 'Not authenticated. This hosted TradeStaq MCP server expects a bearer token from your client connector — authorize the TradeStaq connector (OAuth) so it attaches one per request.'
+      : 'Not authenticated. Run the authenticate tool first.')
   }
 
   await refreshTokenIfNeeded()
@@ -96,7 +108,7 @@ export async function api<T = unknown>(
       const res = await fetch(url, {
         method: options.method ?? 'GET',
         headers: {
-          Authorization: `Bearer ${config.token}`,
+          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
           'X-MCP-Source': 'tradestaq-mcp',
         },

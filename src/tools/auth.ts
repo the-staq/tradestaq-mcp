@@ -4,6 +4,7 @@ import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { loadConfig, saveConfig, clearToken, isAuthenticated } from '../config.js'
 import { api, ApiError } from '../api.js'
+import { getRequestStore } from '../request-context.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 interface CheckAuthResponse {
@@ -44,6 +45,19 @@ async function readOAuthJson(res: Response): Promise<{ data: any; parseOk: boole
 
 export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio' = 'stdio') {
 
+  // Config-mutating / browser-launching auth tools only make sense on a local
+  // (stdio) install, where the server runs on the user's machine and owns one
+  // machine-wide credential. On a hosted server they would mutate process-shared
+  // state or open a browser server-side, so they refuse with guidance toward
+  // connector-level bearer auth.
+  const hostedGuard = () => ({
+    isError: true as const,
+    content: [{
+      type: 'text' as const,
+      text: `Not available on a hosted TradeStaq MCP server (--http): this tool manages a local, machine-wide credential (or opens a browser) and only applies to local stdio installs. On a hosted server, authenticate at the connector level — your client obtains a bearer token via the OAuth flow advertised at /.well-known/oauth-protected-resource and sends it with each request.`,
+    }],
+  })
+
   server.tool(
     'login',
     'Log in to TradeStaq with email and password and store the returned access token locally. Simple credential login for automation and headless use; for interactive users prefer authenticate (browser OAuth, where credentials never enter the chat). Credentials are sent directly to the TradeStaq API over HTTPS and are not persisted — only the returned token is saved.',
@@ -53,6 +67,7 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
     },
     { title: 'Log In', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     async ({ email, password }) => {
+      if (transport === 'http') return hostedGuard()
       const config = loadConfig()
       try {
         const res = await fetch(`${config.baseUrl}/api/users/login`, {
@@ -293,8 +308,12 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
     'Preflight check before invoking other tools. Returns the authenticated user, OAuth scope on the current token (mcp:read / mcp:paper / mcp:live), tier capabilities (allowLiveTrading, allowAIBuilder, allowNewsTrading, allowMcpServer), Strategy Lab wallet balance (for cost-charging tools like generate_strategy), and the OAuth client name/expiry. Agents should call this at the start of a workflow to pick the narrowest scope needed and to surface cost/balance to the user before committing to a charge. Response is cached server-side for 30s per token.',
     {},
     async () => {
-      if (!isAuthenticated()) {
-        return { content: [{ type: 'text' as const, text: 'Not authenticated. Use `authenticate` (browser OAuth, recommended — lets you pick a scope) or `login` (email/password) to sign in.' }] }
+      const store = getRequestStore()
+      const authed = store ? !!store.token : isAuthenticated()
+      if (!authed) {
+        return { content: [{ type: 'text' as const, text: store
+          ? 'Not authenticated. This hosted TradeStaq MCP server expects a bearer token from your client connector — authorize the TradeStaq connector (OAuth) so it attaches one per request.'
+          : 'Not authenticated. Use `authenticate` (browser OAuth, recommended — lets you pick a scope) or `login` (email/password) to sign in.' }] }
       }
       try {
         const data = await api<CheckAuthResponse>('/api/v1/user/me')
@@ -345,7 +364,7 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
         // disagrees, and the server is authoritative. Clear the stale token
         // so subsequent tool calls don't keep hitting the same wall.
         if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
-          clearToken()
+          if (!store) clearToken()  // never mutate the shared file token in hosted mode
           return {
             isError: true,
             content: [{
@@ -374,6 +393,7 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
     token: z.string().describe('A valid TradeStaq JWT access token.'),
     baseUrl: z.string().optional().describe('Optional API base URL override for self-hosted or staging servers. Defaults to the production TradeStaq API.'),
   }, { title: 'Set Token', readOnlyHint: false, destructiveHint: false, idempotentHint: true }, async ({ token, baseUrl }) => {
+    if (transport === 'http') return hostedGuard()
     const config = loadConfig()
     saveConfig({
       ...config,
@@ -389,6 +409,7 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
     'Connect a new exchange account via browser. Opens a page where you securely enter your exchange API keys. Keys never enter the chat.',
     {},
     async () => {
+      if (transport === 'http') return hostedGuard()
       const config = loadConfig()
       const url = `${config.baseUrl}/dashboard/exchanges/new`
 
@@ -411,6 +432,7 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
   )
 
   server.tool('logout', 'Remove the stored TradeStaq credentials from local config (~/.tradestaq/mcp-config.json), signing the user out. Also clears the cached OAuth client so the next authenticate registers cleanly — call this before re-authenticating with a different scope.', {}, { title: 'Log Out', readOnlyHint: false, destructiveHint: false, idempotentHint: true }, async () => {
+    if (transport === 'http') return hostedGuard()
     clearToken()
     return { content: [{ type: 'text' as const, text: 'Logged out. Use login to sign in again.' }] }
   })
