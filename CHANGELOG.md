@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.6] - 2026-07-09
+
+### Fixed
+- **Authenticated tool calls no longer 401 when the base URL is the apex host.** The apex `https://tradestaq.com` 301-redirects to `https://www.tradestaq.com`, and `fetch`/undici strips the `Authorization` header on that cross-origin redirect — so OAuth login succeeded but every subsequent API call reached the upstream with no bearer and returned 401 ("authenticated, but every tool fails"). `loadConfig()` now normalizes an apex `baseUrl` to `www` from **any** source (stale config file, `TRADESTAQ_BASE_URL` env, user override) via the new exported `normalizeBaseUrl()`, keeping API calls same-origin so the bearer survives. Non-apex hosts (staging, self-hosted, custom) are untouched. Mirrors the www-forcing already applied to the site's `.well-known/oauth-*` routes.
+
 ## [0.3.5] - 2026-07-08
 
 ### Fixed

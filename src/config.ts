@@ -17,6 +17,18 @@ const CONFIG_FILE = path.join(CONFIG_DIR, 'mcp-config.json')
 
 let _cache: McpConfig | null = null
 
+// The apex host (tradestaq.com) 301-redirects to www, and fetch/undici strips
+// the Authorization header on that cross-origin redirect — so an apex baseUrl
+// authenticates fine at the OAuth layer but every subsequent API call reaches
+// the upstream with no bearer and 401s ("authenticated, but every tool fails").
+// Force www so API calls stay same-origin and the bearer survives. Mirrors the
+// www-forcing in the site's .well-known/oauth-* routes; a stray apex value from
+// ANY source (stale config file, env override, user input) can no longer strip
+// auth. Non-apex hosts (staging, self-hosted, custom) are left untouched.
+export function normalizeBaseUrl(url: string): string {
+  return url.replace(/^https:\/\/tradestaq\.com/, 'https://www.tradestaq.com')
+}
+
 export function loadConfig(): McpConfig {
   if (_cache) return _cache
   const defaults: McpConfig = { baseUrl: 'https://www.tradestaq.com' }
@@ -25,20 +37,18 @@ export function loadConfig(): McpConfig {
   const envToken = process.env.TRADESTAQ_TOKEN
   const envBaseUrl = process.env.TRADESTAQ_BASE_URL
 
+  let config: McpConfig
   try {
     const raw = fs.readFileSync(CONFIG_FILE, 'utf-8')
-    const config = { ...defaults, ...JSON.parse(raw) }
-    if (envToken) config.token = envToken
-    if (envBaseUrl) config.baseUrl = envBaseUrl
-    _cache = config
-    return config
+    config = { ...defaults, ...JSON.parse(raw) }
   } catch {
-    const config = { ...defaults }
-    if (envToken) config.token = envToken
-    if (envBaseUrl) config.baseUrl = envBaseUrl
-    _cache = config
-    return config
+    config = { ...defaults }
   }
+  if (envToken) config.token = envToken
+  if (envBaseUrl) config.baseUrl = envBaseUrl
+  config.baseUrl = normalizeBaseUrl(config.baseUrl)
+  _cache = config
+  return config
 }
 
 export function saveConfig(config: McpConfig): void {
