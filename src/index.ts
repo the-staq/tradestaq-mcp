@@ -4,7 +4,6 @@ import fs from 'node:fs'
 import http from 'node:http'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -49,15 +48,15 @@ function createServer(transport: 'http' | 'stdio'): McpServer {
 }
 
 if (mode === 'http') {
-  // HTTP+SSE transport — multiple clients, stateful sessions
-  const sessions = new Map<string, { server: McpServer; transport: StreamableHTTPServerTransport }>()
+  // Streamable HTTP transport, STATELESS: a fresh server+transport per request,
+  // so a restart or deploy never drops live sessions (there are none to drop).
 
   const httpServer = http.createServer(async (req, res) => {
     // CORS headers for browser-based MCP clients
     res.setHeader('Access-Control-Allow-Origin', '*')
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, mcp-session-id')
-    res.setHeader('Access-Control-Expose-Headers', 'mcp-session-id')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, mcp-session-id, Authorization')
+    res.setHeader('Access-Control-Expose-Headers', 'mcp-session-id, WWW-Authenticate')
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
@@ -68,7 +67,7 @@ if (mode === 'http') {
     // Health check
     if (req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ status: 'ok', version, sessions: sessions.size }))
+      res.end(JSON.stringify({ status: 'ok', version, transport: 'stateless' }))
       return
     }
 
@@ -96,50 +95,62 @@ if (mode === 'http') {
       return
     }
 
-    // MCP endpoint
+    // MCP endpoint — stateless: no session map, so restarts/deploys can't drop
+    // live sessions. Each POST spins up a throwaway server+transport.
     if (req.url === '/mcp') {
-      const sessionId = req.headers['mcp-session-id'] as string | undefined
-
-      // Per-request bearer for hosted auth. Every /mcp request runs inside a
-      // requestContext store (even unauthenticated, with token undefined) so
-      // tools/api() use THIS request's token and never the shared file token.
+      // Per-request bearer for hosted auth. Tools/api() read THIS request's
+      // token via requestContext and never the shared file token.
       const _authz = req.headers['authorization']
       const bearer =
         typeof _authz === 'string' && _authz.toLowerCase().startsWith('bearer ')
           ? _authz.slice(7).trim()
           : undefined
 
-      if (req.method === 'POST' && !sessionId) {
-        // New session — create server + transport
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
+      // No bearer → challenge (RFC 9728 §5.1). An unauthenticated connection now
+      // reports as NOT connected in MCP clients (surfacing a Connect button)
+      // instead of the old phantom "Connected" state, and points the client at
+      // the protected-resource metadata so it can discover the OAuth flow.
+      if (!bearer) {
+        const mcpUrl = process.env.MCP_PUBLIC_URL || 'https://mcp.tradestaq.com/mcp'
+        let metaUrl = 'https://mcp.tradestaq.com/.well-known/oauth-protected-resource'
+        try {
+          metaUrl = new URL('/.well-known/oauth-protected-resource', mcpUrl).href
+        } catch {
+          // keep the default
+        }
+        res.writeHead(401, {
+          'Content-Type': 'application/json',
+          'WWW-Authenticate': `Bearer resource_metadata="${metaUrl}"`,
         })
-        const server = createServer('http')
-        await server.connect(transport)
-
-        transport.onclose = () => {
-          const sid = transport.sessionId
-          if (sid) sessions.delete(sid)
-        }
-
-        await requestContext.run({ token: bearer }, () => transport.handleRequest(req, res))
-
-        if (transport.sessionId) {
-          sessions.set(transport.sessionId, { server, transport })
-        }
+        res.end(
+          JSON.stringify({
+            error: 'unauthorized',
+            error_description:
+              'Authenticate the TradeStaq connector via OAuth; discover the flow at the linked protected-resource metadata.',
+          }),
+        )
         return
       }
 
-      if (sessionId && sessions.has(sessionId)) {
-        // Existing session
-        const session = sessions.get(sessionId)!
-        await requestContext.run({ token: bearer }, () => session.transport.handleRequest(req, res))
+      if (req.method !== 'POST') {
+        // Stateless mode has no long-lived stream/session to GET or DELETE.
+        res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'POST' })
+        res.end(
+          JSON.stringify({ error: 'method_not_allowed', error_description: 'Stateless MCP server — use POST.' }),
+        )
         return
       }
 
-      // Unknown session or missing session ID on non-init request
-      res.writeHead(400, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: 'Invalid or missing session' }))
+      // Fresh, throwaway server+transport per request (stateless mode:
+      // sessionIdGenerator undefined). Torn down when the response closes.
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+      const server = createServer('http')
+      res.on('close', () => {
+        transport.close()
+        server.close()
+      })
+      await server.connect(transport)
+      await requestContext.run({ token: bearer }, () => transport.handleRequest(req, res))
       return
     }
 

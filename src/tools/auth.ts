@@ -200,7 +200,16 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
               return
             }
 
-            saveConfig({ ...config, token, tokenExpiresAt: Date.now() + (tokenData.expires_in || 604800) * 1000 })
+            // Persist fresh (loadConfig) so the client_id/refresh-capable flag
+            // just saved during registration isn't clobbered. Store the refresh
+            // token for silent renewal; access tokens are short-lived now.
+            saveConfig({
+              ...loadConfig(),
+              token,
+              tokenExpiresAt: Date.now() + (tokenData.expires_in || 3600) * 1000,
+              refreshToken: tokenData.refresh_token || undefined,
+              refreshExpiresAt: tokenData.refresh_token ? Date.now() + 30 * 24 * 3600 * 1000 : undefined,
+            })
             res.writeHead(200, { 'Content-Type': 'text/html' })
             res.end('<html><body><h2>Authenticated!</h2><p>You can close this window and return to your AI assistant.</p></body></html>')
             srv.close()
@@ -228,8 +237,13 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
             // client_id. The server matches our actual port-specific callback
             // at the authorize step via the RFC 8252 §7.3 loopback exception.
             const registeredRedirect = 'http://127.0.0.1/callback'
+            // Reuse a cached client_id only if it was registered WITH the
+            // refresh_token grant; clients from older versions can't issue
+            // refresh tokens, so re-register instead of reusing them.
             const cachedClientId =
-              config.oauthClientIdForBaseUrl === config.baseUrl ? config.oauthClientId : undefined
+              config.oauthClientIdForBaseUrl === config.baseUrl && config.oauthClientRefreshCapable
+                ? config.oauthClientId
+                : undefined
 
             if (cachedClientId) {
               clientId = cachedClientId
@@ -240,7 +254,7 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
                 body: JSON.stringify({
                   redirect_uris: [registeredRedirect],
                   client_name: 'TradeStaq MCP Client',
-                  grant_types: ['authorization_code'],
+                  grant_types: ['authorization_code', 'refresh_token'],
                   response_types: ['code'],
                   token_endpoint_auth_method: 'none',
                   scope,
@@ -263,6 +277,7 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
                 ...config,
                 oauthClientId: regData.client_id,
                 oauthClientIdForBaseUrl: config.baseUrl,
+                oauthClientRefreshCapable: true,
               })
             }
 

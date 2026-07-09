@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.7] - 2026-07-09
+
+### Added
+- **OAuth 2.1 refresh tokens — silent renewal, no weekly re-consent.** `authenticate` now registers its client for the `refresh_token` grant and stores the `refresh_token` from the token endpoint. `api()` proactively rotates an access token within 5 minutes of expiry, and recovers from a 401 by rotating once and retrying — so the now-short-lived (~60 min) access tokens renew transparently. On `invalid_grant` (expired/revoked/reuse-detected refresh token) the stored credentials are cleared so the next call cleanly prompts re-authentication. Hosted (per-request bearer) sessions are unaffected — the client connector owns their refresh. A cached client_id registered by an older version (no refresh grant) is re-registered automatically. +5 tests.
+
+### Changed
+- **Hosted (`--http`) transport is now stateless.** A throwaway server+transport is created per request instead of tracking sessions in memory, so a restart or deploy no longer drops live agent sessions. `GET`/`DELETE /mcp` return 405 (no long-lived stream in stateless mode).
+- **Unauthenticated `/mcp` requests return `401` with `WWW-Authenticate: Bearer resource_metadata=…` (RFC 9728).** MCP clients now surface a proper Connect affordance and can discover the OAuth flow, instead of the previous phantom "Connected" state on a connection with no bearer. `Authorization` is added to the CORS allow/expose lists for browser clients.
+
 ## [0.3.6] - 2026-07-09
 
 ### Fixed

@@ -6,10 +6,18 @@ export interface McpConfig {
   token?: string
   baseUrl: string
   tokenExpiresAt?: number
+  // Rotating OAuth 2.1 refresh token (opaque). Used to silently mint a fresh
+  // access token when the short-lived one expires — no browser re-consent.
+  refreshToken?: string
+  refreshExpiresAt?: number
   // OAuth client_id from Dynamic Client Registration, cached across auth attempts.
   // Keyed under baseUrl so switching environments gets a fresh registration.
   oauthClientId?: string
   oauthClientIdForBaseUrl?: string
+  // True once the cached client_id was registered WITH the refresh_token grant.
+  // Clients registered by older versions lack it, so we re-register rather than
+  // reuse a client that can't issue refresh tokens.
+  oauthClientRefreshCapable?: boolean
 }
 
 const CONFIG_DIR = path.join(os.homedir(), '.tradestaq')
@@ -62,6 +70,8 @@ export function clearToken(): void {
   const config = loadConfig()
   delete config.token
   delete config.tokenExpiresAt
+  delete config.refreshToken
+  delete config.refreshExpiresAt
   // Also drop the cached OAuth client_id. It was registered with whatever
   // scope the last authenticate call used; a subsequent authenticate with
   // a different scope should re-register cleanly rather than reuse a
@@ -69,6 +79,7 @@ export function clearToken(): void {
   // registered scope as an upper bound on authorize-time scope requests).
   delete config.oauthClientId
   delete config.oauthClientIdForBaseUrl
+  delete config.oauthClientRefreshCapable
   saveConfig(config)
 }
 
