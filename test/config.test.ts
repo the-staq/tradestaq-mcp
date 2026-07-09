@@ -101,10 +101,10 @@ describe('clearToken', () => {
     const { configModule, fs } = await freshImport()
     const stored = {
       token: 'abc',
-      baseUrl: 'https://tradestaq.com',
+      baseUrl: 'https://custom.example',
       tokenExpiresAt: 123456,
       oauthClientId: 'client_old_registered_with_paper_scope',
-      oauthClientIdForBaseUrl: 'https://tradestaq.com',
+      oauthClientIdForBaseUrl: 'https://custom.example',
     }
     ;(fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(JSON.stringify(stored))
 
@@ -114,8 +114,49 @@ describe('clearToken', () => {
     const saved = JSON.parse(writtenJson)
     expect(saved.oauthClientId).toBeUndefined()
     expect(saved.oauthClientIdForBaseUrl).toBeUndefined()
-    // baseUrl is user-chosen config, must survive logout
-    expect(saved.baseUrl).toBe('https://tradestaq.com')
+    // A non-apex, user-chosen baseUrl must survive logout untouched.
+    expect(saved.baseUrl).toBe('https://custom.example')
+  })
+})
+
+describe('normalizeBaseUrl (apex→www)', () => {
+  it('rewrites the apex host to www (bearer-stripping 301 guard)', async () => {
+    const { configModule } = await freshImport()
+    expect(configModule.normalizeBaseUrl('https://tradestaq.com')).toBe('https://www.tradestaq.com')
+    expect(configModule.normalizeBaseUrl('https://tradestaq.com/api/v1/user/me')).toBe(
+      'https://www.tradestaq.com/api/v1/user/me',
+    )
+  })
+
+  it('leaves www and non-apex hosts untouched', async () => {
+    const { configModule } = await freshImport()
+    expect(configModule.normalizeBaseUrl('https://www.tradestaq.com')).toBe('https://www.tradestaq.com')
+    expect(configModule.normalizeBaseUrl('https://staging.tradestaq.com')).toBe('https://staging.tradestaq.com')
+    expect(configModule.normalizeBaseUrl('https://custom.example')).toBe('https://custom.example')
+    expect(configModule.normalizeBaseUrl('http://localhost:3002')).toBe('http://localhost:3002')
+  })
+
+  it('loadConfig normalizes an apex baseUrl from the config file', async () => {
+    const { configModule, fs } = await freshImport()
+    ;(fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(
+      JSON.stringify({ baseUrl: 'https://tradestaq.com' }),
+    )
+    expect(configModule.loadConfig().baseUrl).toBe('https://www.tradestaq.com')
+  })
+
+  it('loadConfig normalizes an apex baseUrl from the env override', async () => {
+    const { configModule, fs } = await freshImport()
+    ;(fs.readFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error('ENOENT')
+    })
+    const prev = process.env.TRADESTAQ_BASE_URL
+    process.env.TRADESTAQ_BASE_URL = 'https://tradestaq.com'
+    try {
+      expect(configModule.loadConfig().baseUrl).toBe('https://www.tradestaq.com')
+    } finally {
+      if (prev === undefined) delete process.env.TRADESTAQ_BASE_URL
+      else process.env.TRADESTAQ_BASE_URL = prev
+    }
   })
 })
 
