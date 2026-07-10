@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.8] - 2026-07-10
+
+### Fixed
+- **Protected-resource metadata advertises the real scopes.** The `/.well-known/oauth-protected-resource` document served by the hosted (`--http`) transport advertised `scopes_supported: ['mcp']`, a stale vocabulary the server no longer issues or enforces — every token is now `mcp:read` / `mcp:paper` / `mcp:live`. A spec-strict MCP client reading this metadata to discover valid scopes could request the wrong one. Now advertises `['mcp:read', 'mcp:paper', 'mcp:live']`, matching the site's `.well-known/oauth-*` routes and the actual scope enforcement.
+
 ## [0.3.7] - 2026-07-09
 
 ### Added
