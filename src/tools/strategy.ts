@@ -133,6 +133,43 @@ export function registerStrategyTools(server: McpServer) {
     return { content: [{ type: 'text' as const, text: `Strategy "${name}" created.\nID: ${data.id || data._id}\n\nBacktest it with what_if_backtest or deploy with deploy_bot.` }] }
   }))
 
+  server.tool(
+    'update_strategy',
+    'Update one of your own strategies: metadata (name, description, category, market, tags) and/or its code. Writing `code` creates or updates a DRAFT version — the currently stable/live version keeps running unaffected until you explicitly promote the draft with `status`. Use get_strategy first to see current values and status. Get the strategy ID from list_strategies(owned:true); non-admins cannot edit a suspended strategy.',
+    {
+      id: z.string().describe('Strategy ID to update, obtained from list_strategies(owned:true) or get_strategy.'),
+      name: z.string().optional().describe('New display name. Omit to leave unchanged.'),
+      description: z.string().optional().describe('New description. Omit to leave unchanged.'),
+      category: z.string().optional().describe('New category. Omit to leave unchanged.'),
+      market: z.enum(['spot', 'futures', 'both']).optional().describe('New market type. Omit to leave unchanged.'),
+      tags: z.array(z.string()).optional().describe('Replace the strategy\'s tags. Omit to leave unchanged.'),
+      code: z.string().optional().describe('New TradeDroid strategy code. This writes to a DRAFT version, never directly to the live/stable one. Validate with what_if_backtest before promoting.'),
+      status: z.enum(['draft', 'testing', 'live', 'listed']).optional()
+        .describe('Advance the strategy through its publish workflow. Valid transitions only: draft->testing, testing->draft|live, live->testing|listed, listed->live. An invalid transition is rejected with a 400.'),
+    },
+    { title: 'Update Strategy', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    withErrorHandling(async ({ id, name, description, category, market, tags, code, status }) => {
+      const body: Record<string, unknown> = {}
+      if (name !== undefined) body.name = name
+      if (description !== undefined) body.description = description
+      if (category !== undefined) body.category = category
+      if (market !== undefined) body.market = market
+      if (tags !== undefined) body.tags = tags
+      if (code !== undefined) body.code = code
+      if (status !== undefined) body.status = status
+
+      const raw = await api<any>(`/api/user-strategies/${id}`, { method: 'PATCH', body })
+      const s = raw.data || raw
+      return jsonResult({
+        id: s.id || s._id, name: s.name, status: s.status,
+        latestVersion: s.latestVersion, stableVersion: s.stableVersion,
+        message: code !== undefined
+          ? 'Strategy updated. Code changes are saved to a draft version -- run what_if_backtest against it, then set status to promote it.'
+          : 'Strategy updated.',
+      })
+    }),
+  )
+
   server.tool('generate_strategy', 'Generate a complete trading strategy from a natural-language description using AI (FORGE). Describe the idea and it writes runnable TradeDroid strategy code — no coding required — then saves it so you can validate with what_if_backtest and deploy with deploy_bot. The fastest path from idea to a deployable strategy. Note: AI generation is a paid, cost-bearing operation and can take up to ~2 minutes.', {
     description: z.string().describe('Natural-language description of the strategy, e.g. "momentum strategy for ETH that buys on RSI oversold and sells on RSI overbought with a 2% trailing stop".'),
     market: z.enum(['spot', 'futures']).default('futures').describe('"spot" for cash trading or "futures" for leveraged/perpetual contracts. Defaults to futures.'),

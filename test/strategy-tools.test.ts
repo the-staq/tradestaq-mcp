@@ -1,9 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { registerStrategyTools } from '../src/tools/strategy.js'
+import { ApiError } from '../src/api.js'
 
 const { mockApi } = vi.hoisted(() => ({ mockApi: vi.fn() }))
-vi.mock('../src/api.js', () => ({ api: mockApi }))
+vi.mock('../src/api.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/api.js')>('../src/api.js')
+  return { ...actual, api: mockApi }
+})
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -80,5 +84,51 @@ describe('list_strategies', () => {
     expect(params.get('sort')).toBe('newest')
     expect(params.has('marketplace')).toBe(false)
     expect(params.has('pricing')).toBe(false)
+  })
+})
+
+describe('update_strategy', () => {
+  it('PATCHes only the fields provided, and reads the real { data: ... } response shape', async () => {
+    mockApi.mockResolvedValue({ data: { id: 's1', name: 'New Name', status: 'draft', latestVersion: 'v2', stableVersion: 'v1' } })
+
+    const handler = getToolHandler('update_strategy')
+    const result = await handler({ id: 's1', name: 'New Name' })
+
+    expect(mockApi).toHaveBeenCalledWith('/api/user-strategies/s1', { method: 'PATCH', body: { name: 'New Name' } })
+    expect(await jsonOf(result)).toEqual({
+      id: 's1', name: 'New Name', status: 'draft', latestVersion: 'v2', stableVersion: 'v1',
+      message: 'Strategy updated.',
+    })
+  })
+
+  it('sends code changes and notes they land on a draft, not the live version', async () => {
+    mockApi.mockResolvedValue({ data: { id: 's1', name: 'My Strategy', status: 'live', latestVersion: 'v3', stableVersion: 'v1' } })
+
+    const handler = getToolHandler('update_strategy')
+    const result = await handler({ id: 's1', code: 'td.strategy.enterLong()' })
+
+    expect(mockApi).toHaveBeenCalledWith('/api/user-strategies/s1', { method: 'PATCH', body: { code: 'td.strategy.enterLong()' } })
+    const body = await jsonOf(result)
+    expect(body.message).toContain('draft version');
+  })
+
+  it('forwards a status transition request', async () => {
+    mockApi.mockResolvedValue({ data: { id: 's1', status: 'testing' } })
+
+    const handler = getToolHandler('update_strategy')
+    await handler({ id: 's1', status: 'testing' })
+
+    expect(mockApi).toHaveBeenCalledWith('/api/user-strategies/s1', { method: 'PATCH', body: { status: 'testing' } })
+  })
+
+  it('surfaces an invalid status transition as a real ApiError instead of a generic failure', async () => {
+    mockApi.mockRejectedValue(new ApiError(400, 'HTTP_400', "Cannot change status from 'draft' to 'listed'", false))
+
+    const handler = getToolHandler('update_strategy')
+    const result = await handler({ id: 's1', status: 'listed' })
+
+    expect(result.isError).toBe(true)
+    const body = JSON.parse(result.content[0].text)
+    expect(body.error.message).toContain("Cannot change status from 'draft' to 'listed'")
   })
 })
