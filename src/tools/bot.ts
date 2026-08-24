@@ -1,57 +1,132 @@
 import { z } from 'zod'
-import { api } from '../api.js'
+import { api, ApiError } from '../api.js'
 import { jsonResult, withErrorHandling } from '../helpers.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+
+// The Bots collection has NO top-level isPaper/paperTrading field -- whether a
+// bot trades real money is determined entirely by the isPaper flag on the
+// exchange(s) it's attached to (GET /api/bots enriches each bot with a
+// populated `exchanges` array). Every tool below reads paper status from
+// there, never from a bot-level field that doesn't exist.
+function primaryExchangeOf(bot: any): any {
+  return (bot.exchanges || [])[0]
+}
+
+function strategyNameOf(bot: any): string | undefined {
+  if (bot.strategyDetails?.name) return bot.strategyDetails.name
+  if (typeof bot.strategy === 'object' && bot.strategy) return bot.strategy.name
+  return typeof bot.strategy === 'string' ? bot.strategy : undefined
+}
 
 export function registerBotTools(server: McpServer) {
 
   server.tool('list_bots', 'List all your trading bots with status and performance.', {}, withErrorHandling(async () => {
     const data = await api<any>('/api/bots')
-    const bots = data.bots || data.docs || []
+    const bots = data.docs || data.bots || []
     if (!bots.length) return { content: [{ type: 'text' as const, text: 'No trading bots. Use deploy_bot to create one.' }] }
-    return jsonResult(bots.map((b: any) => ({
-      id: b.id || b._id, name: b.name, status: b.status,
-      strategy: b.strategyName || b.strategy, symbol: b.symbol,
-      exchange: b.exchangeName, isPaper: b.paperTrading, pnl: b.pnl,
-    })))
+    return jsonResult(bots.map((b: any) => {
+      const ex = primaryExchangeOf(b)
+      return {
+        id: b.id || b._id, name: b.name, status: b.status,
+        strategy: strategyNameOf(b), symbol: b.symbol,
+        exchange: ex?.accountLabel || ex?.name,
+        isPaper: ex ? !!ex.isPaper : undefined,
+        pnl: b.stats?.totalPnl,
+      }
+    }))
   }))
 
   server.tool('get_bot_status', 'Get detailed status, configuration, and live performance for a specific trading bot by ID. Returns its run status, the strategy/symbol/exchange it trades, whether it is paper or live, P&L, win rate, total trades, and risk config (leverage, stop-loss, take-profit). Use it to check how a deployed bot is doing. Read-only — to stop a bot use stop_bot. Get bot IDs from list_bots.', {
     id: z.string().describe('The bot ID to inspect, obtained from list_bots.'),
   }, { title: 'Get Bot Status', readOnlyHint: true }, withErrorHandling(async ({ id }) => {
-    const data = await api<any>(`/api/bots/${id}`)
+    const raw = await api<any>(`/api/bots/${id}`)
+    const data = raw.doc || raw
+    const ex = primaryExchangeOf(data)
+    const stats = data.stats || {}
     return jsonResult({
       id: data.id || data._id, name: data.name, status: data.status,
-      strategy: data.strategyName, symbol: data.symbol, exchange: data.exchangeName,
-      isPaper: data.paperTrading, createdAt: data.createdAt,
-      performance: { pnl: data.pnl, winRate: data.winRate, totalTrades: data.totalTrades },
-      config: { leverage: data.leverage, stopLoss: data.stopLoss, takeProfit: data.takeProfit },
+      strategy: strategyNameOf(data), symbol: data.symbol,
+      exchange: ex?.accountLabel || ex?.name,
+      isPaper: ex ? !!ex.isPaper : undefined,
+      createdAt: data.createdAt,
+      performance: {
+        pnl: stats.totalPnl,
+        winRate: stats.totalTrades ? (stats.winningTrades / stats.totalTrades) * 100 : undefined,
+        totalTrades: stats.totalTrades,
+        thirtyDayReturn: data.thirtyDayReturn,
+      },
+      config: {
+        leverage: data.positionSizing?.leverage,
+        stopLoss: data.positionSizing?.stopLoss,
+        takeProfit: data.positionSizing?.takeProfit,
+      },
+      openPosition: data.openPosition,
     })
   }))
 
   server.tool(
     'deploy_bot',
-    'Deploy a strategy as a trading bot. Defaults to paper trading for safety.',
+    'Deploy a strategy as a trading bot. Defaults to paper trading for safety — whether a bot trades real money is determined entirely by the exchange account it\'s attached to (not by the `live` flag alone), so this refuses to deploy if `live` doesn\'t match the target exchange\'s own paper/live status. Check an exchange\'s status with list_exchanges first, or create one with create_paper_exchange.',
     {
       strategyId: z.string().describe('Strategy ID to deploy'),
-      exchangeId: z.string().describe('Exchange account ID'),
+      exchangeId: z.string().describe('Exchange account ID. Its own isPaper status (see list_exchanges) determines whether this bot trades real money — must match the `live` flag below.'),
       symbol: z.string().default('BTC/USDT'),
+      market: z.enum(['spot', 'futures']).optional().describe('Market type. Omit to use the account default (spot).'),
       name: z.string().optional(),
-      live: z.boolean().default(false).describe('If true, trades with real money. Defaults to paper.'),
-      leverage: z.number().min(1).max(20).default(1),
+      live: z.boolean().default(false).describe('Must match the target exchange\'s own paper/live status: false requires a paper exchange, true requires a live one. Defaults to false (paper) for safety.'),
+      positionSizePercent: z.number().min(0).max(100).default(10).describe('Position size as a percentage of account balance per trade. Defaults to 10%.'),
+      leverage: z.number().min(1).max(125).default(1),
       stopLoss: z.number().optional().describe('Stop loss % (e.g. 5)'),
       takeProfit: z.number().optional().describe('Take profit % (e.g. 10)'),
     },
-    withErrorHandling(async ({ strategyId, exchangeId, symbol, name, live, leverage, stopLoss, takeProfit }) => {
+    withErrorHandling(async ({ strategyId, exchangeId, symbol, market, name, live, positionSizePercent, leverage, stopLoss, takeProfit }) => {
+      // The server enforces paper/live via OAuth scope tied to the target
+      // exchange's real isPaper flag, but that surfaces as an opaque 403.
+      // Check up front so a mismatch fails with an actionable message instead.
+      const exchangesData = await api<any>('/api/exchanges')
+      const exchanges = exchangesData.exchanges || exchangesData.docs || []
+      const targetExchange = exchanges.find((e: any) => (e.id || e._id) === exchangeId)
+      if (!targetExchange) {
+        throw new ApiError(404, 'EXCHANGE_NOT_FOUND', `Exchange ${exchangeId} not found. Use list_exchanges to find a valid ID.`, false)
+      }
+      const exchangeIsPaper = !!targetExchange.isPaper
+      if (live === exchangeIsPaper) {
+        throw new ApiError(
+          400,
+          'PAPER_LIVE_MISMATCH',
+          `live:${live} was requested but exchange "${targetExchange.name}" (${exchangeId}) is a ${exchangeIsPaper ? 'PAPER' : 'LIVE'} account. ` +
+          `A bot's paper/live status is determined entirely by the exchange it's attached to, not by this flag. ` +
+          (live
+            ? 'Pick a live (non-paper) exchange from list_exchanges.'
+            : 'Pick a paper exchange from list_exchanges (isPaper: true), or create one with create_paper_exchange.'),
+          false,
+        )
+      }
+
       const data = await api<any>('/api/bots', {
         method: 'POST',
-        body: { strategyId, exchangeId, symbol, name, paperTrading: !live, leverage, stopLoss, takeProfit },
+        body: {
+          triggerType: 'strategy',
+          strategy: strategyId,
+          exchange: [exchangeId],
+          symbol,
+          name,
+          ...(market ? { market } : {}),
+          positionSizing: {
+            type: 'percentage',
+            value: positionSizePercent,
+            leverage,
+            ...(stopLoss !== undefined ? { stopLoss } : {}),
+            ...(takeProfit !== undefined ? { takeProfit } : {}),
+          },
+        },
       })
-      const mode = live ? 'LIVE' : 'PAPER (simulated)'
+      const bot = data.doc || data
+      const mode = exchangeIsPaper ? 'PAPER (simulated)' : 'LIVE'
       return {
         content: [{
           type: 'text' as const,
-          text: `Bot deployed in ${mode} mode.\nID: ${data.id || data._id}\nSymbol: ${symbol}\nLeverage: ${leverage}x\n${live ? '\nThis bot is trading with REAL money.' : '\nPaper trading. No real money at risk.'}`,
+          text: `Bot deployed in ${mode} mode on ${targetExchange.name}.\nID: ${bot.id || bot._id}\nSymbol: ${symbol}\nLeverage: ${leverage}x\n${exchangeIsPaper ? 'Paper trading. No real money at risk.' : '\nThis bot is trading with REAL money.'}`,
         }],
       }
     }),
@@ -68,28 +143,33 @@ export function registerBotTools(server: McpServer) {
     id: z.string().describe('The bot ID whose trades to export, obtained from list_bots.'),
     format: z.enum(['summary', 'full']).default('summary').describe('"summary" = performance stats plus recent trades (default); "full" = every trade the bot has made.'),
   }, { title: 'Export Bot Trades', readOnlyHint: true }, withErrorHandling(async ({ id, format }) => {
-    // Get bot details
-    const bot = await api<any>(`/api/bots/${id}`)
-    // Get trade history
-    const trades = await api<any>(`/api/trades/history?botId=${id}&limit=${format === 'full' ? 200 : 20}`)
-    const tradeList = trades.trades || trades || []
+    const raw = await api<any>(`/api/bots/${id}`)
+    const bot = raw.doc || raw
+    const ex = primaryExchangeOf(bot)
+
+    // GET /api/trades/history has no botId filter at all -- it only supports
+    // exchangeId/symbol/page/limit. Scope by the bot's own exchange server-side
+    // (narrows the fetch) and filter to this bot's own trades client-side
+    // (the route's .lean() docs carry the real `bot` field), since otherwise
+    // this would silently return every trade across every bot on that exchange.
+    const params = new URLSearchParams({ limit: String(format === 'full' ? 200 : 20) })
+    if (ex) params.set('exchangeId', String(ex.id || ex._id))
+    const trades = await api<any>(`/api/trades/history?${params}`)
+    const tradeList = (trades.trades || []).filter((t: any) => String(t.bot) === id)
 
     const result: any = {
       bot: {
-        id: bot.id || bot._id,
-        name: bot.name,
-        symbol: bot.symbol,
-        status: bot.status,
-        isPaper: bot.paperTrading,
+        id: bot.id || bot._id, name: bot.name, symbol: bot.symbol, status: bot.status,
+        isPaper: ex ? !!ex.isPaper : undefined,
       },
       stats: bot.stats || {},
-      tradeCount: Array.isArray(tradeList) ? tradeList.length : 0,
-      trades: Array.isArray(tradeList) ? tradeList.map((t: any) => ({
+      tradeCount: tradeList.length,
+      trades: tradeList.map((t: any) => ({
         symbol: t.symbol, side: t.side,
         entryPrice: t.entryPrice, exitPrice: t.exitPrice,
         pnl: t.pnl, size: t.size, leverage: t.leverage,
         status: t.status, openedAt: t.openedAt, closedAt: t.closedAt,
-      })) : [],
+      })),
       exportLinks: {
         csv: `/api/bots/${id}/export/csv`,
         pdf: `/api/bots/${id}/export/pdf`,
@@ -99,15 +179,29 @@ export function registerBotTools(server: McpServer) {
     return jsonResult(result)
   }))
 
-  server.tool('close_position', 'Close an open trading position by placing a market order — fully or partially. This moves real money when the position is live, so confirm intent with the user before calling. Find the tradeId, exchangeId, and symbol with get_positions. Set percentage below 100 for a partial close.', {
-    tradeId: z.string().describe('The trade/position ID to close, obtained from get_positions.'),
+  server.tool('close_position', 'Close an open trading position by placing a market order — fully or partially. This moves real money when the position is live, so confirm intent with the user before calling. Find the exchangeId, symbol, and side with get_positions. Set percentage below 100 for a partial close.', {
     exchangeId: z.string().describe('The exchange account ID where the position is open, from get_positions or list_exchanges.'),
     symbol: z.string().describe('Trading pair of the position, e.g. "BTC/USDT".'),
+    side: z.enum(['long', 'short']).describe('Position side, from get_positions.'),
     percentage: z.number().min(1).max(100).default(100).describe('Percentage of the position to close, 1-100. 100 = full close (default); e.g. 50 closes half.'),
-  }, { title: 'Close Position', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }, withErrorHandling(async ({ tradeId, exchangeId, symbol, percentage }) => {
+  }, { title: 'Close Position', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }, withErrorHandling(async ({ exchangeId, symbol, side, percentage }) => {
+    // The close endpoint takes an ABSOLUTE size, not a percentage -- resolve
+    // the position's real size first so a 50% request actually closes half
+    // the position instead of being misread as "close 50 units."
+    const positionsData = await api<any>(`/api/v1/positions`)
+    const position = (positionsData.positions || []).find(
+      // UserPosition has both `exchange` (platform name, e.g. "binance") and
+      // `exchangeId` (the actual account id) -- match on the id, not the name.
+      (p: any) => String(p.exchangeId) === String(exchangeId) && p.symbol === symbol && p.side === side,
+    )
+    if (!position) {
+      throw new ApiError(404, 'POSITION_NOT_FOUND', `No open ${side} position for ${symbol} on exchange ${exchangeId}. Use get_positions to see what's actually open.`, false)
+    }
+    const size = position.size * (percentage / 100)
+
     const data = await api<any>('/api/positions/close', {
       method: 'POST',
-      body: { tradeId, exchangeId, symbol, size: String(percentage) },
+      body: { exchangeId, symbol, side, size },
     })
     const pnl = data.pnl ?? data.body?.pnl
     return {
