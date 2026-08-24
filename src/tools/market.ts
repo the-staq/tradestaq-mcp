@@ -91,15 +91,27 @@ export function registerMarketTools(server: McpServer) {
     query: z.string().describe('Search query (e.g. "BTC", "ETH/USDT")'),
     exchange: z.string().describe('Filter by exchange'),
   }, withErrorHandling(async ({ query, exchange }) => {
+    // GET /api/exchanges/:id/markets (list mode, no `symbol` param) returns
+    // { symbols: string[], timeframes: string[] } — plain unified-symbol
+    // strings, not objects. There's no separate base/quote/type breakdown at
+    // this endpoint (that only comes back from the single-symbol query mode),
+    // so derive it from the ccxt symbol format instead: "BTC/USDT" or
+    // "BTC/USDC:USDC" (a ':SETTLE' suffix marks a swap/future).
     const data = await api<any>(`/api/exchanges/${exchange}/markets`)
-    const markets = (data.markets || [])
-      .filter((m: any) => m.symbol?.toUpperCase().includes(query.toUpperCase()))
+    const symbols: string[] = data.symbols || []
+    const matches = symbols
+      .filter((s) => s.toUpperCase().includes(query.toUpperCase()))
       .slice(0, 20)
+      .map((symbol) => {
+        const [base, quotePart] = symbol.split('/')
+        const [quote, settle] = (quotePart || '').split(':')
+        return { symbol, base, quote, type: settle ? 'swap' : 'spot' }
+      })
     return {
       content: [{
         type: 'text' as const,
-        text: markets.length
-          ? JSON.stringify(markets.map((m: any) => ({ symbol: m.symbol, base: m.base, quote: m.quote, type: m.type })), null, 2)
+        text: matches.length
+          ? JSON.stringify(matches, null, 2)
           : `No markets found matching "${query}".`,
       }],
     }

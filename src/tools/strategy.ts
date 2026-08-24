@@ -5,15 +5,38 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 export function registerStrategyTools(server: McpServer) {
 
-  server.tool('list_strategies', 'List available trading strategies — either the public marketplace or the user\'s own library. Use it to discover strategies to backtest or deploy, or to find strategy IDs for get_strategy, compare_strategies, and deploy_bot. Read-only.', {
+  server.tool('list_strategies', 'List available trading strategies — either the public marketplace or the user\'s own library. Supports filtering and sorting. Use it to discover strategies to backtest or deploy, or to find strategy IDs for get_strategy, compare_strategies, and deploy_bot. Read-only.', {
     owned: z.boolean().default(false).describe('If true, return only the user\'s own strategies; if false (default), return the public marketplace catalog.'),
-  }, { title: 'List Strategies', readOnlyHint: true }, withErrorHandling(async ({ owned }) => {
-    const endpoint = owned ? '/api/user-strategies' : '/api/tradedroid/strategies'
+    market: z.enum(['spot', 'futures', 'both']).optional().describe('Filter by market type.'),
+    category: z.string().optional().describe('Filter by category, e.g. "official", "community", "custom".'),
+    status: z.string().optional().describe('owned:true only. Filter by status, e.g. "live" or "listed" for published-only strategies. Comma-separate multiple values, e.g. "live,listed".'),
+    pricing: z.enum(['free', 'paid']).optional().describe('owned:false only. Filter by pricing.'),
+    search: z.string().optional().describe('Filter by a name/description substring match.'),
+    sort: z.enum(['newest', 'oldest', 'name', 'downloads', 'popular', 'rating', 'roi', 'winRate', 'trending']).optional()
+      .describe('Sort order. owned:true supports newest (default), oldest, name, downloads. owned:false (marketplace) additionally supports popular, rating, roi, winRate, trending.'),
+    limit: z.number().min(1).max(100).default(50).describe('Max results to return, 1-100. Defaults to 50.'),
+  }, { title: 'List Strategies', readOnlyHint: true }, withErrorHandling(async ({ owned, market, category, status, pricing, search, sort, limit }) => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (market) params.set('market', market)
+    if (category) params.set('category', category)
+    if (search) params.set('search', search)
+    if (sort) params.set('sort', sort)
+    if (owned) {
+      if (status) params.set('status', status)
+    } else {
+      params.set('marketplace', 'true')
+      if (pricing) params.set('pricing', pricing)
+    }
+    const endpoint = `${owned ? '/api/user-strategies' : '/api/tradedroid/strategies'}?${params}`
     const data = await api<any>(endpoint)
-    const strategies = data.strategies || data.docs || []
+    // /api/user-strategies wraps its list under `data`; /api/tradedroid/strategies
+    // returns the raw Payload pagination object (`docs`). Neither ever uses
+    // `strategies` — that key was a bug, always producing an empty list.
+    const strategies = data.data || data.docs || []
     return jsonResult(strategies.map((s: any) => ({
       id: s.id || s._id, name: s.name, description: s.description?.slice(0, 200),
       market: s.market, timeframe: s.timeframe, price: s.price, rating: s.rating,
+      ...(owned ? { status: s.status, category: s.category } : {}),
     })))
   }))
 
