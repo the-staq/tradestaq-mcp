@@ -70,3 +70,31 @@ describe('search_markets', () => {
     expect(await textOf(result)).toBe('No markets found matching "ZZZ".')
   })
 })
+
+describe('create_paper_exchange', () => {
+  it('generates the required exchangeSlug field -- the Exchanges collection rejects creation without one', async () => {
+    // exchangeSlug is `required: true` on the collection (src/collections/Exchanges.ts)
+    // and is only ever generated client-side by the web wizard, never by the
+    // server. Every create_paper_exchange call failed with "The following
+    // field is invalid: Exchange Identifier (Slug)" until this was added.
+    mockApi.mockResolvedValue({ doc: { id: 'ex-new-1', name: 'bybit', exchangeType: 'futures', accountLabel: 'Bybit Paper' } })
+
+    const handler = getToolHandler('create_paper_exchange')
+    await handler({ platform: 'bybit', exchangeType: 'futures', initialBalanceUsdt: 10000 })
+
+    const [, options] = mockApi.mock.calls[0]
+    expect(options.body.exchangeSlug).toMatch(/^bybit-paper-[a-f0-9]{6}$/)
+  })
+
+  it('generates a distinct slug per call so two paper accounts on the same platform never collide', async () => {
+    mockApi.mockResolvedValue({ doc: { id: 'ex-1' } })
+    const handler = getToolHandler('create_paper_exchange')
+
+    await handler({ platform: 'binance', exchangeType: 'spot', initialBalanceUsdt: 10000 })
+    await handler({ platform: 'binance', exchangeType: 'spot', initialBalanceUsdt: 10000 })
+
+    const slug1 = mockApi.mock.calls[0][1].body.exchangeSlug
+    const slug2 = mockApi.mock.calls[1][1].body.exchangeSlug
+    expect(slug1).not.toBe(slug2)
+  })
+})

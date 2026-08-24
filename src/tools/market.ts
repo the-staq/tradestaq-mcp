@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import { api } from '../api.js'
 import { jsonResult, withErrorHandling } from '../helpers.js'
@@ -63,6 +64,14 @@ export function registerMarketTools(server: McpServer) {
         exchangeType,
         isPaper: true,
         accountLabel: accountLabel || `${platform} Paper`,
+        // `exchangeSlug` is a required field on the Exchanges collection
+        // (used to target this account from TradingView webhook alerts) --
+        // the web wizard generates one client-side from the account label,
+        // the server never does. Without it every create_paper_exchange call
+        // fails with "The following field is invalid: Exchange Identifier
+        // (Slug)". A random suffix avoids collisions across paper accounts
+        // that share a platform (e.g. two "Bybit Paper" test accounts).
+        exchangeSlug: `${platform.toLowerCase()}-paper-${randomBytes(3).toString('hex')}`,
         initialBalances: { USDT: initialBalanceUsdt },
       }
       const data = await api<any>('/api/exchanges', { method: 'POST', body })
