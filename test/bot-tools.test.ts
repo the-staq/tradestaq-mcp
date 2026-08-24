@@ -156,6 +156,56 @@ describe('deploy_bot', () => {
   })
 })
 
+describe('update_bot', () => {
+  it('merges the requested change on top of the bot\'s CURRENT positionSizing instead of overwriting it', async () => {
+    // PATCH /api/bots/:id treats positionSizing as a whole group -- a naive
+    // { positionSizing: { leverage: 10 } } would silently drop value/stopLoss/
+    // takeProfit that were already set.
+    mockApi
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', positionSizing: { type: 'percentage', value: 10, leverage: 1, stopLoss: 5 } } })
+      .mockResolvedValueOnce({ doc: { id: 'bot-1' } })
+
+    const handler = getToolHandler('update_bot')
+    await handler({ id: 'bot-1', leverage: 10 })
+
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/bots/bot-1', {
+      method: 'PATCH',
+      body: { positionSizing: { type: 'percentage', value: 10, leverage: 10, stopLoss: 5 } },
+    })
+  })
+
+  it('falls back to sane defaults when the bot has no positionSizing yet', async () => {
+    mockApi
+      .mockResolvedValueOnce({ doc: { id: 'bot-1' } })
+      .mockResolvedValueOnce({ doc: { id: 'bot-1' } })
+
+    const handler = getToolHandler('update_bot')
+    await handler({ id: 'bot-1', positionSizePercent: 20 })
+
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/bots/bot-1', {
+      method: 'PATCH',
+      body: { positionSizing: { type: 'percentage', value: 20, leverage: 1 } },
+    })
+  })
+})
+
+describe('start_bot / stop_bot', () => {
+  it('start_bot PATCHes status:active', async () => {
+    mockApi.mockResolvedValue({})
+    const handler = getToolHandler('start_bot')
+    const result = await handler({ id: 'bot-1' })
+    expect(mockApi).toHaveBeenCalledWith('/api/bots/bot-1/status', { method: 'PATCH', body: { status: 'active' } })
+    expect(await textOf(result)).toBe('Bot bot-1 activated.')
+  })
+
+  it('stop_bot uses PATCH, not PUT -- the route only exports PATCH and a PUT would 404/405', async () => {
+    mockApi.mockResolvedValue({})
+    const handler = getToolHandler('stop_bot')
+    await handler({ id: 'bot-1' })
+    expect(mockApi).toHaveBeenCalledWith('/api/bots/bot-1/status', { method: 'PATCH', body: { status: 'stopped' } })
+  })
+})
+
 describe('export_bot_trades', () => {
   it('scopes trades to this bot only, since /api/trades/history has no botId filter server-side', async () => {
     mockApi

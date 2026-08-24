@@ -132,10 +132,45 @@ export function registerBotTools(server: McpServer) {
     }),
   )
 
-  server.tool('stop_bot', 'Stop a running trading bot so it stops opening new positions. Any positions it currently holds stay open — close those separately with close_position. The bot and its config are kept and can be restarted later, so this is a reversible state change, not a delete. Check state first with get_bot_status; find bot IDs with list_bots.', {
+  server.tool(
+    'update_bot',
+    'Update a deployed bot\'s risk settings: leverage, position size (% of balance), stop loss, or take profit. Fetches the bot\'s current settings first and merges your changes on top — the underlying PATCH endpoint expects the full positionSizing object, so a naive partial update would silently wipe out any field you didn\'t mention. Get bot IDs from list_bots; check current values with get_bot_status first.',
+    {
+      id: z.string().describe('The bot ID to update, obtained from list_bots.'),
+      leverage: z.number().min(1).max(125).optional().describe('New leverage. Omit to leave unchanged.'),
+      positionSizePercent: z.number().min(0).max(100).optional().describe('New position size as a percentage of account balance per trade. Omit to leave unchanged.'),
+      stopLoss: z.number().optional().describe('New stop loss %. Omit to leave unchanged.'),
+      takeProfit: z.number().optional().describe('New take profit %. Omit to leave unchanged.'),
+    },
+    { title: 'Update Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    withErrorHandling(async ({ id, leverage, positionSizePercent, stopLoss, takeProfit }) => {
+      const raw = await api<any>(`/api/bots/${id}`)
+      const current = (raw.doc || raw).positionSizing || { type: 'percentage', value: 10, leverage: 1 }
+      const positionSizing = {
+        ...current,
+        ...(leverage !== undefined ? { leverage } : {}),
+        ...(positionSizePercent !== undefined ? { value: positionSizePercent } : {}),
+        ...(stopLoss !== undefined ? { stopLoss } : {}),
+        ...(takeProfit !== undefined ? { takeProfit } : {}),
+      }
+      await api<any>(`/api/bots/${id}`, { method: 'PATCH', body: { positionSizing } })
+      return { content: [{ type: 'text' as const, text: `Bot ${id} updated. leverage: ${positionSizing.leverage}x, position size: ${positionSizing.value}%${positionSizing.stopLoss != null ? `, stop loss: ${positionSizing.stopLoss}%` : ''}${positionSizing.takeProfit != null ? `, take profit: ${positionSizing.takeProfit}%` : ''}` }] }
+    }),
+  )
+
+  server.tool('start_bot', 'Activate a bot so it starts opening new positions on its next scheduled interval. Newly deployed strategy bots come up in "paused" status by default — this is the step that actually starts them trading (paper or live, depending on the exchange it\'s attached to). Check state first with get_bot_status; find bot IDs with list_bots.', {
+    id: z.string().describe('The bot ID to activate, obtained from list_bots.'),
+  }, { title: 'Start Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: true }, withErrorHandling(async ({ id }) => {
+    await api<any>(`/api/bots/${id}/status`, { method: 'PATCH', body: { status: 'active' } })
+    return { content: [{ type: 'text' as const, text: `Bot ${id} activated.` }] }
+  }))
+
+  server.tool('stop_bot', 'Stop a running trading bot so it stops opening new positions. Any positions it currently holds stay open — close those separately with close_position. The bot and its config are kept and can be restarted later (with start_bot), so this is a reversible state change, not a delete. Check state first with get_bot_status; find bot IDs with list_bots.', {
     id: z.string().describe('The bot ID to stop, obtained from list_bots.'),
   }, { title: 'Stop Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: true }, withErrorHandling(async ({ id }) => {
-    await api<any>(`/api/bots/${id}/status`, { method: 'PUT', body: { status: 'stopped' } })
+    // PUT /api/bots/:id/status doesn't exist -- the route only exports PATCH.
+    // A PUT here silently 404s/405s, so stop_bot never actually stopped anything.
+    await api<any>(`/api/bots/${id}/status`, { method: 'PATCH', body: { status: 'stopped' } })
     return { content: [{ type: 'text' as const, text: `Bot ${id} stopped. Open positions remain until manually closed.` }] }
   }))
 
