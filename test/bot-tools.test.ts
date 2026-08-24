@@ -187,6 +187,62 @@ describe('update_bot', () => {
       body: { positionSizing: { type: 'percentage', value: 20, leverage: 1 } },
     })
   })
+
+  it('toggling notifyOnTrade merges onto the messaging group for a strategy bot, without touching positionSizing', async () => {
+    mockApi
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', triggerType: 'strategy', messaging: { notifyOnTrade: true, forwardToPublic: true, signalFormat: 'standard' } } })
+      .mockResolvedValueOnce({ doc: { id: 'bot-1' } })
+
+    const handler = getToolHandler('update_bot')
+    const result = await handler({ id: 'bot-1', notifyOnTrade: false })
+
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/bots/bot-1', {
+      method: 'PATCH',
+      body: { messaging: { notifyOnTrade: false, forwardToPublic: true, signalFormat: 'standard' } },
+    })
+    expect(await textOf(result)).toContain('notifications: off')
+  })
+
+  it('toggling notifyOnTrade on a manual bot merges onto manualMessaging instead of messaging', async () => {
+    mockApi
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', triggerType: 'manual', manualMessaging: { notifyOnTrade: false } } })
+      .mockResolvedValueOnce({ doc: { id: 'bot-1' } })
+
+    const handler = getToolHandler('update_bot')
+    await handler({ id: 'bot-1', notifyOnTrade: true })
+
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/bots/bot-1', {
+      method: 'PATCH',
+      body: { manualMessaging: { notifyOnTrade: true } },
+    })
+  })
+
+  it('combines a risk-setting change and a notification toggle in one PATCH', async () => {
+    mockApi
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', triggerType: 'webhook', positionSizing: { type: 'percentage', value: 10, leverage: 5 }, messaging: {} } })
+      .mockResolvedValueOnce({ doc: { id: 'bot-1' } })
+
+    const handler = getToolHandler('update_bot')
+    await handler({ id: 'bot-1', leverage: 8, notifyOnTrade: false })
+
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/bots/bot-1', {
+      method: 'PATCH',
+      body: {
+        positionSizing: { type: 'percentage', value: 10, leverage: 8 },
+        messaging: { notifyOnTrade: false },
+      },
+    })
+  })
+
+  it('rejects a call with no fields to update instead of sending an empty PATCH', async () => {
+    mockApi.mockResolvedValueOnce({ doc: { id: 'bot-1' } })
+
+    const handler = getToolHandler('update_bot')
+    const result = await handler({ id: 'bot-1' })
+
+    expect(result.isError).toBe(true)
+    expect(mockApi).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('start_bot / stop_bot', () => {

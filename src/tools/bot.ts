@@ -134,27 +134,54 @@ export function registerBotTools(server: McpServer) {
 
   server.tool(
     'update_bot',
-    'Update a deployed bot\'s risk settings: leverage, position size (% of balance), stop loss, or take profit. Fetches the bot\'s current settings first and merges your changes on top — the underlying PATCH endpoint expects the full positionSizing object, so a naive partial update would silently wipe out any field you didn\'t mention. Get bot IDs from list_bots; check current values with get_bot_status first.',
+    'Update a deployed bot\'s risk settings (leverage, position size %, stop loss, take profit) and/or its trade-notification toggle. Fetches the bot\'s current settings first and merges your changes on top — the underlying PATCH endpoint expects full group objects (positionSizing, messaging/manualMessaging), so a naive partial update would silently wipe out any field you didn\'t mention. Get bot IDs from list_bots; check current values with get_bot_status first.',
     {
       id: z.string().describe('The bot ID to update, obtained from list_bots.'),
       leverage: z.number().min(1).max(125).optional().describe('New leverage. Omit to leave unchanged.'),
       positionSizePercent: z.number().min(0).max(100).optional().describe('New position size as a percentage of account balance per trade. Omit to leave unchanged.'),
       stopLoss: z.number().optional().describe('New stop loss %. Omit to leave unchanged.'),
       takeProfit: z.number().optional().describe('New take profit %. Omit to leave unchanged.'),
+      notifyOnTrade: z.boolean().optional().describe('Whether to send a Telegram notification for each trade this bot executes. Omit to leave unchanged.'),
     },
     { title: 'Update Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-    withErrorHandling(async ({ id, leverage, positionSizePercent, stopLoss, takeProfit }) => {
+    withErrorHandling(async ({ id, leverage, positionSizePercent, stopLoss, takeProfit, notifyOnTrade }) => {
       const raw = await api<any>(`/api/bots/${id}`)
-      const current = (raw.doc || raw).positionSizing || { type: 'percentage', value: 10, leverage: 1 }
-      const positionSizing = {
-        ...current,
-        ...(leverage !== undefined ? { leverage } : {}),
-        ...(positionSizePercent !== undefined ? { value: positionSizePercent } : {}),
-        ...(stopLoss !== undefined ? { stopLoss } : {}),
-        ...(takeProfit !== undefined ? { takeProfit } : {}),
+      const bot = raw.doc || raw
+      const body: Record<string, unknown> = {}
+      const parts: string[] = []
+
+      const riskChanged = leverage !== undefined || positionSizePercent !== undefined || stopLoss !== undefined || takeProfit !== undefined
+      if (riskChanged) {
+        const current = bot.positionSizing || { type: 'percentage', value: 10, leverage: 1 }
+        const positionSizing = {
+          ...current,
+          ...(leverage !== undefined ? { leverage } : {}),
+          ...(positionSizePercent !== undefined ? { value: positionSizePercent } : {}),
+          ...(stopLoss !== undefined ? { stopLoss } : {}),
+          ...(takeProfit !== undefined ? { takeProfit } : {}),
+        }
+        body.positionSizing = positionSizing
+        parts.push(`leverage: ${positionSizing.leverage}x`, `position size: ${positionSizing.value}%`)
+        if (positionSizing.stopLoss != null) parts.push(`stop loss: ${positionSizing.stopLoss}%`)
+        if (positionSizing.takeProfit != null) parts.push(`take profit: ${positionSizing.takeProfit}%`)
       }
-      await api<any>(`/api/bots/${id}`, { method: 'PATCH', body: { positionSizing } })
-      return { content: [{ type: 'text' as const, text: `Bot ${id} updated. leverage: ${positionSizing.leverage}x, position size: ${positionSizing.value}%${positionSizing.stopLoss != null ? `, stop loss: ${positionSizing.stopLoss}%` : ''}${positionSizing.takeProfit != null ? `, take profit: ${positionSizing.takeProfit}%` : ''}` }] }
+
+      if (notifyOnTrade !== undefined) {
+        // Messaging settings live in a different group depending on trigger type
+        // (`manualMessaging` for manual bots, `messaging` for webhook/strategy
+        // bots) -- same partial-group-wipes-siblings hazard as positionSizing,
+        // so fetch-then-merge whichever one this bot actually uses.
+        const messagingKey = bot.triggerType === 'manual' ? 'manualMessaging' : 'messaging'
+        body[messagingKey] = { ...(bot[messagingKey] || {}), notifyOnTrade }
+        parts.push(`notifications: ${notifyOnTrade ? 'on' : 'off'}`)
+      }
+
+      if (!Object.keys(body).length) {
+        throw new ApiError(400, 'NO_CHANGES', 'No fields provided to update.', false)
+      }
+
+      await api<any>(`/api/bots/${id}`, { method: 'PATCH', body })
+      return { content: [{ type: 'text' as const, text: `Bot ${id} updated. ${parts.join(', ')}` }] }
     }),
   )
 
