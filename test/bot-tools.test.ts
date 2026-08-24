@@ -263,23 +263,92 @@ describe('start_bot / stop_bot', () => {
 })
 
 describe('export_bot_trades', () => {
-  it('scopes trades to this bot only, since /api/trades/history has no botId filter server-side', async () => {
+  it('filters server-side by botId (not exchangeId + client-side filter) -- a bot sharing a busy exchange with others must not have its own trades crowded out of a fixed-size page before filtering even runs', async () => {
     mockApi
-      .mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'GridRunner BTC', exchanges: [{ id: 'ex-1', isPaper: true }], stats: {} } })
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'GridRunner BTC', exchanges: [{ id: 'ex-1', isPaper: true }] } })
       .mockResolvedValueOnce({
-        trades: [
-          { bot: 'bot-1', symbol: 'BTC/USDT', side: 'long', pnl: 5 },
-          { bot: 'some-other-bot', symbol: 'BTC/USDT', side: 'long', pnl: 999 },
-        ],
+        trades: [{ symbol: 'BTC/USDT', side: 'long', pnl: 5, status: 'closed' }],
+        pagination: { total: 1 },
       })
 
     const handler = getToolHandler('export_bot_trades')
     const result = await handler({ id: 'bot-1', format: 'summary' })
 
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/trades/history?botId=bot-1&limit=20')
     const body = await jsonOf(result)
     expect(body.tradeCount).toBe(1)
     expect(body.trades).toHaveLength(1)
     expect(body.trades[0].pnl).toBe(5)
+  })
+
+  it('format:"full" requests a much larger page than "summary", since "full" means every trade', async () => {
+    mockApi
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'GridRunner BTC', exchanges: [] } })
+      .mockResolvedValueOnce({ trades: [], pagination: { total: 0 } })
+
+    const handler = getToolHandler('export_bot_trades')
+    await handler({ id: 'bot-1', format: 'full' })
+
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/trades/history?botId=bot-1&limit=1000')
+  })
+
+  it('computes stats from the fetched trades directly, not from the bot document\'s own (possibly empty/stale) stats field -- regression: a real bot had an empty stats field while its trades summed to a real, large, non-zero total', async () => {
+    mockApi
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'Crowd Fade ZEC', exchanges: [], stats: {} } })
+      .mockResolvedValueOnce({
+        trades: [
+          { symbol: 'ZEC/USDT', side: 'sell', pnl: -100, status: 'closed' },
+          { symbol: 'ZEC/USDT', side: 'buy', pnl: 50, status: 'closed' },
+          { symbol: 'ZEC/USDT', side: 'buy', status: 'closed' }, // entry leg, no pnl -- excluded from stats
+          { symbol: 'ZEC/USDT', side: 'buy', pnl: 25, status: 'canceled' }, // canceled -- excluded
+        ],
+        pagination: { total: 4 },
+      })
+
+    const handler = getToolHandler('export_bot_trades')
+    const result = await handler({ id: 'bot-1', format: 'full' })
+
+    const body = await jsonOf(result)
+    expect(body.stats.totalPnl).toBe(-50) // -100 + 50, excluding the entry leg and the canceled trade
+    expect(body.stats.totalTrades).toBe(2)
+    expect(body.stats.winningTrades).toBe(1)
+    expect(body.stats.winRate).toBe(50)
+    // The full (unfiltered) trade list is still returned for inspection --
+    // only the STATS are scoped to real closing trades.
+    expect(body.trades).toHaveLength(4)
+  })
+
+  it('flags truncation when the exchange holds more trades than the page fetched, instead of silently presenting a partial fetch as the complete history', async () => {
+    mockApi
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'Busy Bot', exchanges: [] } })
+      .mockResolvedValueOnce({
+        trades: [{ symbol: 'BTC/USDT', side: 'sell', pnl: 1, status: 'closed' }],
+        pagination: { total: 5000 },
+      })
+
+    const handler = getToolHandler('export_bot_trades')
+    const result = await handler({ id: 'bot-1', format: 'full' })
+
+    const body = await jsonOf(result)
+    expect(body.truncated).toBe(true)
+    expect(body.totalTradesOnRecord).toBe(5000)
+    expect(body.warning).toContain('5000')
+  })
+
+  it('omits the truncation fields entirely when the full history fit in one page', async () => {
+    mockApi
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'Quiet Bot', exchanges: [] } })
+      .mockResolvedValueOnce({
+        trades: [{ symbol: 'BTC/USDT', side: 'sell', pnl: 1, status: 'closed' }],
+        pagination: { total: 1 },
+      })
+
+    const handler = getToolHandler('export_bot_trades')
+    const result = await handler({ id: 'bot-1', format: 'full' })
+
+    const body = await jsonOf(result)
+    expect(body.truncated).toBeUndefined()
+    expect(body.totalTradesOnRecord).toBeUndefined()
   })
 })
 

@@ -209,23 +209,48 @@ export function registerBotTools(server: McpServer) {
     const bot = raw.doc || raw
     const ex = primaryExchangeOf(bot)
 
-    // GET /api/trades/history has no botId filter at all -- it only supports
-    // exchangeId/symbol/page/limit. Scope by the bot's own exchange server-side
-    // (narrows the fetch) and filter to this bot's own trades client-side
-    // (the route's .lean() docs carry the real `bot` field), since otherwise
-    // this would silently return every trade across every bot on that exchange.
-    const params = new URLSearchParams({ limit: String(format === 'full' ? 200 : 20) })
-    if (ex) params.set('exchangeId', String(ex.id || ex._id))
-    const trades = await api<any>(`/api/trades/history?${params}`)
-    const tradeList = (trades.trades || []).filter((t: any) => String(t.bot) === id)
+    // GET /api/trades/history now supports a real botId filter (added
+    // alongside this fix). The OLD approach here -- scope by exchangeId,
+    // filter to this bot client-side after the page limit was already
+    // applied -- silently truncated any bot sharing a busy exchange with
+    // other bots: confirmed live, one bot's export returned 36 of its real
+    // 665 trade docs, another 37 of 2,490, both undercounting total PnL by
+    // over 10x purely because exchange-mates' trades crowded the fixed-size
+    // page before this bot's own trades were even reached.
+    const fetchLimit = format === 'full' ? 1000 : 20
+    const params = new URLSearchParams({ botId: id, limit: String(fetchLimit) })
+    const tradesRes = await api<any>(`/api/trades/history?${params}`)
+    const tradeList = tradesRes.trades || []
+    const totalOnRecord = tradesRes.pagination?.total ?? tradeList.length
+    const truncated = totalOnRecord > tradeList.length
+
+    // Computed from what was actually fetched, not the bot document's own
+    // stats field -- that field is empty/stale for at least some bots
+    // (confirmed: both examples above had no stored stats at all), and a
+    // number that doesn't match the trades listed right next to it is
+    // exactly the kind of mismatch that caused this bug to look like data
+    // corruption instead of a truncated fetch.
+    const closingTrades = tradeList.filter((t: any) => t.status !== 'canceled' && typeof t.pnl === 'number')
+    const totalPnl = closingTrades.reduce((sum: number, t: any) => sum + (t.pnl || 0), 0)
+    const winningTrades = closingTrades.filter((t: any) => (t.pnl || 0) > 0).length
 
     const result: any = {
       bot: {
         id: bot.id || bot._id, name: bot.name, symbol: bot.symbol, status: bot.status,
         isPaper: ex ? !!ex.isPaper : undefined,
       },
-      stats: bot.stats || {},
+      stats: {
+        totalPnl,
+        totalTrades: closingTrades.length,
+        winningTrades,
+        winRate: closingTrades.length ? (winningTrades / closingTrades.length) * 100 : undefined,
+      },
       tradeCount: tradeList.length,
+      ...(truncated ? {
+        truncated: true,
+        totalTradesOnRecord: totalOnRecord,
+        warning: `Only the ${tradeList.length} most recent of ${totalOnRecord} total trades are included below -- the stats above reflect only this partial set, not the bot's full history. Ask for a narrower time range or treat totalPnl as a lower/upper bound only.`,
+      } : {}),
       trades: tradeList.map((t: any) => ({
         symbol: t.symbol, side: t.side,
         entryPrice: t.entryPrice, exitPrice: t.exitPrice,
