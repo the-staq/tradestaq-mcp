@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { api } from '../api.js'
+import { api, ApiError } from '../api.js'
 import { jsonResult, withErrorHandling } from '../helpers.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
@@ -40,15 +40,39 @@ export function registerStrategyTools(server: McpServer) {
     })))
   }))
 
-  server.tool('get_strategy', 'Get full details for a specific strategy by ID: description, market/timeframe, performance stats, rating, and code metadata. Use it to inspect a strategy before backtesting, deploying, or comparing. Read-only. Get IDs from list_strategies; use compare_strategies for side-by-side comparison and explain_strategy for a plain-English breakdown.', {
+  server.tool('get_strategy', 'Get full details for a specific strategy by ID: description, market/timeframe, performance stats, rating, code, and parameters. Use it to inspect a strategy before backtesting, deploying, comparing, or editing with update_strategy. Read-only. Get IDs from list_strategies; use compare_strategies for side-by-side comparison and explain_strategy for a plain-English breakdown. `code` is included when you own the strategy (or it\'s a forkable community strategy you have access to); omitted otherwise.', {
     id: z.string().describe('The strategy ID to fetch, obtained from list_strategies.'),
   }, { title: 'Get Strategy', readOnlyHint: true }, withErrorHandling(async ({ id }) => {
-    const raw = await api<any>(`/api/tradedroid/strategies/${id}`)
-    const s = raw.doc || raw
-    const lv = s.latestVersion || {}
-    // Extract parameter groups into a clean format
-    const parameterGroups = (lv.parameterGroups || []).map((g: any) => ({
-      group: g.groupName,
+    // /api/user-strategies/:id is the owner-authoritative endpoint: it
+    // resolves `code`/parameterGroups/mtfConfig/dcaConfig/primaryTimeframe
+    // against the real latest-or-stable version doc (healing an orphaned
+    // latestVersion reference), and is the same endpoint update_strategy's
+    // PATCH targets -- so what this returns is exactly what a PATCH would
+    // be editing. The marketplace endpoint has no such version-resolution
+    // fallback and strips `code` entirely for anyone who isn't the author,
+    // so it's only used as a fallback for a strategy this caller doesn't
+    // own (a 403/404 from the owner-only endpoint just means "not yours").
+    let s: any
+    let owned = true
+    try {
+      const raw = await api<any>(`/api/user-strategies/${id}`)
+      s = raw.data || raw
+    } catch (err: any) {
+      if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+        owned = false
+        const raw = await api<any>(`/api/tradedroid/strategies/${id}`)
+        s = raw.doc || raw
+      } else {
+        throw err
+      }
+    }
+
+    // Marketplace responses nest version fields under `latestVersion`; the
+    // owner-authoritative response already resolves them onto the doc
+    // itself (see comment above).
+    const versionSource = owned ? s : (s.latestVersion || {})
+    const parameterGroups = (versionSource.parameterGroups || []).map((g: any) => ({
+      group: g.groupName || g.group,
       parameters: (g.parameters || []).map((p: any) => ({
         name: p.name,
         label: p.label,
@@ -69,11 +93,15 @@ export function registerStrategyTools(server: McpServer) {
       category: s.category,
       tags: s.tags,
       strategyType: s.strategyType,
-      version: lv.semanticVersion || lv.version,
-      timeframe: lv.validationConfig?.timeframe,
-      requiredIndicators: lv.requiredIndicators,
+      status: s.status,
+      // version/requiredIndicators live only on the version doc and aren't
+      // surfaced by the owner-authoritative endpoint's response shape.
+      version: owned ? undefined : (versionSource.semanticVersion || versionSource.version),
+      timeframe: owned ? s.primaryTimeframe : versionSource.validationConfig?.timeframe,
+      requiredIndicators: owned ? undefined : versionSource.requiredIndicators,
       parameterGroups,
       dcaConfig: s.dcaConfig,
+      code: s.code,
       stats: s.stats,
       pricing: s.pricing,
       rating: s.rating,

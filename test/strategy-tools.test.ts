@@ -87,6 +87,73 @@ describe('list_strategies', () => {
   })
 })
 
+describe('get_strategy', () => {
+  it('reads the owner-authoritative endpoint first, including code and resolved parameterGroups', async () => {
+    mockApi.mockResolvedValue({
+      data: {
+        id: 's1', name: 'My Strategy', market: 'spot', category: 'custom', status: 'draft',
+        code: 'td.strategy.enterLong()',
+        dcaConfig: { enabled: false },
+        primaryTimeframe: '1h',
+        parameterGroups: [{ groupName: 'Entry', parameters: [{ name: 'rsiPeriod', label: 'RSI Period', inputType: 'number', defaultValue: 14 }] }],
+      },
+    })
+
+    const handler = getToolHandler('get_strategy')
+    const result = await handler({ id: 's1' })
+
+    expect(mockApi).toHaveBeenCalledWith('/api/user-strategies/s1')
+    const body = await jsonOf(result)
+    expect(body.code).toBe('td.strategy.enterLong()')
+    expect(body.timeframe).toBe('1h')
+    expect(body.parameterGroups).toEqual([
+      { group: 'Entry', parameters: [expect.objectContaining({ name: 'rsiPeriod', type: 'number', default: 14 })] },
+    ])
+  })
+
+  it('falls back to the marketplace endpoint on a 403 (not the owner), and code comes back omitted', async () => {
+    mockApi
+      .mockRejectedValueOnce(new ApiError(403, 'HTTP_403', 'Forbidden', false))
+      .mockResolvedValueOnce({
+        doc: {
+          id: 'm1', name: 'GhostRider', market: 'both', dcaConfig: { enabled: true },
+          // Marketplace route strips code entirely for a non-author (route.ts: code: undefined).
+          latestVersion: { semanticVersion: '1.2.0', requiredIndicators: ['rsi'], parameterGroups: [] },
+        },
+      })
+
+    const handler = getToolHandler('get_strategy')
+    const result = await handler({ id: 'm1' })
+
+    expect(mockApi).toHaveBeenNthCalledWith(1, '/api/user-strategies/m1')
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/tradedroid/strategies/m1')
+    const body = await jsonOf(result)
+    expect(body.code).toBeUndefined()
+    expect(body.version).toBe('1.2.0')
+  })
+
+  it('falls back on a 404 the same way as a 403', async () => {
+    mockApi
+      .mockRejectedValueOnce(new ApiError(404, 'HTTP_404', 'Not Found', false))
+      .mockResolvedValueOnce({ doc: { id: 'm1', name: 'GhostRider' } })
+
+    const handler = getToolHandler('get_strategy')
+    await handler({ id: 'm1' })
+
+    expect(mockApi).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not fall back on an unrelated error (e.g. 500) -- propagates it instead', async () => {
+    mockApi.mockRejectedValueOnce(new ApiError(500, 'HTTP_500', 'Internal error', true))
+
+    const handler = getToolHandler('get_strategy')
+    const result = await handler({ id: 's1' })
+
+    expect(mockApi).toHaveBeenCalledTimes(1)
+    expect(result.isError).toBe(true)
+  })
+})
+
 describe('update_strategy', () => {
   it('PATCHes only the fields provided, and reads the real { data: ... } response shape', async () => {
     mockApi.mockResolvedValue({ data: { id: 's1', name: 'New Name', status: 'draft', latestVersion: 'v2', stableVersion: 'v1' } })
