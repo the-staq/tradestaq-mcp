@@ -201,6 +201,22 @@ export function registerBotTools(server: McpServer) {
     return { content: [{ type: 'text' as const, text: `Bot ${id} stopped. Open positions remain until manually closed.` }] }
   }))
 
+  server.tool('delete_bot', 'Permanently delete a trading bot and its configuration -- irreversible, the bot cannot be recovered after this call. Refuses if the bot still has an open trade recorded (the delete itself doesn\'t close positions, so deleting it now would orphan that trade with nothing left to manage or close it) -- close_position and stop_bot it first. Confirm with the user before calling. Get bot IDs from list_bots.', {
+    id: z.string().describe('The bot ID to delete, obtained from list_bots.'),
+  }, { title: 'Delete Bot', readOnlyHint: false, destructiveHint: true, idempotentHint: true }, withErrorHandling(async ({ id }) => {
+    const raw = await api<any>(`/api/bots/${id}`)
+    const bot = raw.doc || raw
+    // openTradesCount is computed unconditionally by GET /api/bots/[id]
+    // (unlike its `openPosition` field, which is only populated when
+    // status === 'error') -- the reliable signal for "does this bot own
+    // an open trade right now" regardless of its current status.
+    if (bot.openTradesCount) {
+      throw new ApiError(409, 'OPEN_POSITION_EXISTS', `Bot ${id} (${bot.name}) still has ${bot.openTradesCount} open trade(s) recorded -- deleting it now would orphan them with no bot left to manage or close them. Close the position first (close_position), then delete.`, false)
+    }
+    await api<any>(`/api/bots/${id}`, { method: 'DELETE' })
+    return { content: [{ type: 'text' as const, text: `Bot ${id} (${bot.name}) permanently deleted.` }] }
+  }))
+
   server.tool('export_bot_trades', 'Export a bot\'s trade history as structured data — every closed trade with entry/exit prices and P&L, plus a performance summary. Use it to review or report on how a specific bot has performed. Read-only. Get bot IDs from list_bots.', {
     id: z.string().describe('The bot ID whose trades to export, obtained from list_bots.'),
     format: z.enum(['summary', 'full']).default('summary').describe('"summary" = performance stats plus recent trades (default); "full" = every trade the bot has made.'),

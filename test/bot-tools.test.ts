@@ -262,6 +262,46 @@ describe('start_bot / stop_bot', () => {
   })
 })
 
+describe('delete_bot', () => {
+  it('deletes a bot with no open trades', async () => {
+    mockApi
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'ComboGrid SOL', openTradesCount: 0 } })
+      .mockResolvedValueOnce({ success: true })
+
+    const handler = getToolHandler('delete_bot')
+    const result = await handler({ id: 'bot-1' })
+
+    expect(mockApi).toHaveBeenNthCalledWith(1, '/api/bots/bot-1')
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/bots/bot-1', { method: 'DELETE' })
+    expect(await textOf(result)).toBe('Bot bot-1 (ComboGrid SOL) permanently deleted.')
+  })
+
+  it('refuses to delete a bot that still has an open trade recorded -- the DELETE route itself does not close positions, so deleting it now would orphan them', async () => {
+    mockApi.mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'GridRunner BTC', openTradesCount: 2 } })
+
+    const handler = getToolHandler('delete_bot')
+    const result = await handler({ id: 'bot-1' })
+
+    expect(result.isError).toBe(true)
+    const body = await jsonOf(result)
+    expect(body.error.code).toBe('OPEN_POSITION_EXISTS')
+    expect(body.error.message).toContain('2 open trade')
+    // Never reaches the DELETE call.
+    expect(mockApi).toHaveBeenCalledTimes(1)
+  })
+
+  it('trusts openTradesCount (computed unconditionally), not openPosition (only set when status is "error") -- an active bot with a real open trade must still be refused', async () => {
+    mockApi.mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'GridRunner BTC', status: 'active', openPosition: null, openTradesCount: 1 } })
+
+    const handler = getToolHandler('delete_bot')
+    const result = await handler({ id: 'bot-1' })
+
+    expect(result.isError).toBe(true)
+    const body = await jsonOf(result)
+    expect(body.error.message).toContain('1 open trade');
+  })
+})
+
 describe('export_bot_trades', () => {
   it('filters server-side by botId (not exchangeId + client-side filter) -- a bot sharing a busy exchange with others must not have its own trades crowded out of a fixed-size page before filtering even runs', async () => {
     mockApi
