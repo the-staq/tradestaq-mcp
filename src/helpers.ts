@@ -1,9 +1,35 @@
-import { ApiError } from './api.js'
+import { api, ApiError } from './api.js'
 
 export function jsonResult(data: unknown) {
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
   }
+}
+
+/**
+ * Best-effort strategy name lookup, owner-authoritative first with a
+ * marketplace fallback (same pattern get_strategy uses in strategy.ts).
+ * Never throws -- callers that just want a human-readable label for
+ * something else (e.g. naming a backtest) shouldn't fail the whole
+ * operation because a name lookup 403'd or 404'd. Falls back to the raw ID.
+ */
+export async function resolveStrategyName(id: string): Promise<string> {
+  try {
+    const raw = await api<any>(`/api/user-strategies/${id}`)
+    const name = (raw.data || raw)?.name
+    if (name) return name
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+      try {
+        const raw = await api<any>(`/api/tradedroid/strategies/${id}`)
+        const name = (raw.doc || raw)?.name
+        if (name) return name
+      } catch {
+        // Fall through to the ID below.
+      }
+    }
+  }
+  return id
 }
 
 export function withErrorHandling<T extends (...args: any[]) => Promise<any>>(handler: T): T {

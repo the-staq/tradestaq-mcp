@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { jsonResult, withErrorHandling } from '../src/helpers.js'
+
+const { mockApi } = vi.hoisted(() => ({ mockApi: vi.fn() }))
+vi.mock('../src/api.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/api.js')>('../src/api.js')
+  return { ...actual, api: mockApi }
+})
+
+import { jsonResult, withErrorHandling, resolveStrategyName } from '../src/helpers.js'
 import { ApiError } from '../src/api.js'
 
 beforeEach(() => {
@@ -51,5 +58,57 @@ describe('withErrorHandling', () => {
     expect(parsed.error.code).toBe('INTERNAL_ERROR')
     expect(parsed.error.message).toBe('Something broke')
     expect(parsed.error.retryable).toBe(false)
+  })
+})
+
+describe('resolveStrategyName', () => {
+  it('returns the name from the owner-authoritative endpoint', async () => {
+    mockApi.mockResolvedValueOnce({ data: { name: 'GridRunner' } })
+
+    const name = await resolveStrategyName('s1')
+
+    expect(name).toBe('GridRunner')
+    expect(mockApi).toHaveBeenCalledWith('/api/user-strategies/s1')
+  })
+
+  it('falls back to the marketplace endpoint on a 403 (not the owner)', async () => {
+    mockApi
+      .mockRejectedValueOnce(new ApiError(403, 'HTTP_403', 'Forbidden', false))
+      .mockResolvedValueOnce({ doc: { name: 'GhostRider' } })
+
+    const name = await resolveStrategyName('s2')
+
+    expect(name).toBe('GhostRider')
+    expect(mockApi).toHaveBeenNthCalledWith(1, '/api/user-strategies/s2')
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/tradedroid/strategies/s2')
+  })
+
+  it('falls back to the marketplace endpoint on a 404', async () => {
+    mockApi
+      .mockRejectedValueOnce(new ApiError(404, 'HTTP_404', 'Not Found', false))
+      .mockResolvedValueOnce({ doc: { name: 'Crowd Fade' } })
+
+    const name = await resolveStrategyName('s3')
+
+    expect(name).toBe('Crowd Fade')
+  })
+
+  it('falls back to the raw ID when both lookups fail', async () => {
+    mockApi
+      .mockRejectedValueOnce(new ApiError(404, 'HTTP_404', 'Not Found', false))
+      .mockRejectedValueOnce(new ApiError(404, 'HTTP_404', 'Not Found', false))
+
+    const name = await resolveStrategyName('s4')
+
+    expect(name).toBe('s4')
+  })
+
+  it('falls back to the raw ID when the owner lookup throws a non-403/404 error', async () => {
+    mockApi.mockRejectedValueOnce(new ApiError(500, 'HTTP_500', 'Internal error', true))
+
+    const name = await resolveStrategyName('s5')
+
+    expect(name).toBe('s5')
+    expect(mockApi).toHaveBeenCalledTimes(1)
   })
 })

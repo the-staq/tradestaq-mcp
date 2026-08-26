@@ -1,7 +1,24 @@
 import { z } from 'zod'
 import { api, ApiError } from '../api.js'
-import { jsonResult, withErrorHandling } from '../helpers.js'
+import { jsonResult, withErrorHandling, resolveStrategyName } from '../helpers.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+
+// GET /api/backtests/:id returns the real metrics flat under `metrics`, not
+// nested in a `results` wrapper (that field doesn't exist on the response at
+// all) -- and the metric keys are totalReturnPercent/maxDrawdownPercent, not
+// roi/maxDrawdown. Reading `result.results || result` then `.roi`/`.maxDrawdown`
+// silently produced an all-undefined metrics object on every real backtest.
+function extractMetrics(result: any) {
+  const m = result?.metrics || {}
+  return {
+    totalReturnPercent: m.totalReturnPercent,
+    winRate: m.winRate,
+    totalTrades: m.totalTrades,
+    maxDrawdownPercent: m.maxDrawdownPercent,
+    sharpeRatio: m.sharpeRatio,
+    profitFactor: m.profitFactor,
+  }
+}
 
 export function registerBacktestTools(server: McpServer) {
 
@@ -18,7 +35,12 @@ export function registerBacktestTools(server: McpServer) {
     const startDate = new Date(now)
     startDate.setMonth(startDate.getMonth() - (months[period] || 3))
 
-    const name = `MCP Backtest ${symbol} ${period}`
+    // Real strategy name, not a generic placeholder -- this is what shows up
+    // in the completion Telegram notification and the dashboard backtest
+    // list, and "MCP Backtest ETH/USDT:USDT 3m" told the user nothing about
+    // which strategy actually ran.
+    const strategyName = await resolveStrategyName(strategyId)
+    const name = `${strategyName} — ${symbol} ${period}`
     const job = await api<any>('/api/backtests', {
       method: 'POST',
       body: { name, strategyId, exchangeId, symbol, timeframe, startDate: startDate.toISOString(), endDate: now.toISOString(), initialBalance },
@@ -34,12 +56,15 @@ export function registerBacktestTools(server: McpServer) {
       await new Promise(r => setTimeout(r, 3000))
       try {
         const result = await api<any>(`/api/backtests/${jobId}`)
-        if (result.status === 'completed' || result.results) {
-          const r = result.results || result
+        if (result.status === 'completed') {
+          const metrics = extractMetrics(result)
+          const end = typeof metrics.totalReturnPercent === 'number'
+            ? initialBalance * (1 + metrics.totalReturnPercent / 100)
+            : undefined
           return jsonResult({
             status: 'completed', strategy: strategyId, symbol, period,
-            metrics: { roi: r.roi, totalPnl: r.totalPnl, maxDrawdown: r.maxDrawdown, winRate: r.winRate, sharpeRatio: r.sharpeRatio, profitFactor: r.profitFactor, totalTrades: r.totalTrades },
-            equity: { start: initialBalance, end: r.finalBalance || r.equity },
+            metrics,
+            equity: { start: initialBalance, end },
           })
         }
         if (result.status === 'failed') {
@@ -58,11 +83,10 @@ export function registerBacktestTools(server: McpServer) {
     jobId: z.string().describe('Backtest job ID'),
   }, withErrorHandling(async ({ jobId }) => {
     const result = await api<any>(`/api/backtests/${jobId}`)
-    if (result.status === 'completed' || result.results) {
-      const r = result.results || result
+    if (result.status === 'completed') {
       return jsonResult({
         status: 'completed',
-        metrics: { roi: r.roi, totalPnl: r.totalPnl, maxDrawdown: r.maxDrawdown, winRate: r.winRate, sharpeRatio: r.sharpeRatio, totalTrades: r.totalTrades },
+        metrics: extractMetrics(result),
       })
     }
     return { content: [{ type: 'text' as const, text: `Status: ${result.status || 'pending'}. Try again in a few seconds.` }] }
@@ -72,17 +96,13 @@ export function registerBacktestTools(server: McpServer) {
     id: z.string().describe('Backtest ID'),
   }, withErrorHandling(async ({ id }) => {
     const result = await api<any>(`/api/backtests/${id}`)
-    if (result.status !== 'completed' && !result.results) {
+    if (result.status !== 'completed') {
       return { content: [{ type: 'text' as const, text: `Backtest ${id} is not completed yet (status: ${result.status || 'unknown'}). Wait for completion before exporting.` }] }
     }
-    const r = result.results || result
     return jsonResult({
       id,
       status: 'completed',
-      metrics: {
-        roi: r.roi, totalPnl: r.totalPnl, maxDrawdown: r.maxDrawdown,
-        winRate: r.winRate, sharpeRatio: r.sharpeRatio, totalTrades: r.totalTrades,
-      },
+      metrics: extractMetrics(result),
       exportLinks: {
         csv: `/api/backtests/${id}/export/csv`,
         pdf: `/api/backtests/${id}/export/pdf`,
