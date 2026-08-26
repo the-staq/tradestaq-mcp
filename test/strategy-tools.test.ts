@@ -199,3 +199,122 @@ describe('update_strategy', () => {
     expect(body.error.message).toContain("Cannot change status from 'draft' to 'listed'")
   })
 })
+
+describe('list_strategy_versions', () => {
+  it('marks each version with the channel it currently serves, matched against the strategy doc\'s version refs', async () => {
+    mockApi
+      .mockResolvedValueOnce({
+        docs: [
+          { id: 'v2', semanticVersion: '1.0.1', versionType: 'patch', validationStatus: 'pending', createdAt: '2026-08-26T00:00:00Z' },
+          { id: 'v1', semanticVersion: '1.0.0', versionType: 'major', validationStatus: 'passed', validatedAt: '2026-08-01T00:00:00Z', createdAt: '2026-08-01T00:00:00Z' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        data: { id: 's1', name: 'InfinityGrid', stableVersion: 'v1', latestVersion: 'v2' },
+      })
+
+    const handler = getToolHandler('list_strategy_versions')
+    const result = await handler({ id: 's1' })
+
+    expect(mockApi).toHaveBeenNthCalledWith(1, '/api/tradedroid/strategies/s1/versions')
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/user-strategies/s1')
+    const body = await jsonOf(result)
+    expect(body.versions).toEqual([
+      expect.objectContaining({ id: 'v2', version: '1.0.1', validationStatus: 'pending', channel: 'latest' }),
+      expect.objectContaining({ id: 'v1', version: '1.0.0', validationStatus: 'passed', channel: 'stable' }),
+    ])
+  })
+
+  it('handles stableVersion/latestVersion coming back as populated objects, not just raw IDs', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [{ id: 'v1', semanticVersion: '1.0.0', validationStatus: 'passed' }] })
+      .mockResolvedValueOnce({ data: { id: 's1', stableVersion: { id: 'v1', code: '...' } } })
+
+    const handler = getToolHandler('list_strategy_versions')
+    const result = await handler({ id: 's1' })
+
+    const body = await jsonOf(result)
+    expect(body.versions[0].channel).toBe('stable')
+  })
+
+  it('defaults validationStatus to pending when the version doc omits it', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [{ id: 'v1', semanticVersion: '1.0.0' }] })
+      .mockResolvedValueOnce({ data: { id: 's1' } })
+
+    const handler = getToolHandler('list_strategy_versions')
+    const result = await handler({ id: 's1' })
+
+    const body = await jsonOf(result)
+    expect(body.versions[0].validationStatus).toBe('pending')
+    expect(body.versions[0].channel).toBeUndefined()
+  })
+})
+
+describe('validate_strategy_version', () => {
+  it('POSTs exchangeId/symbol and surfaces the async job status', async () => {
+    mockApi.mockResolvedValue({ success: true, status: 'running', versionId: 'v2', message: 'Validation started. Poll /api/user-strategies/[id]/validation-status for progress.' })
+
+    const handler = getToolHandler('validate_strategy_version')
+    const result = await handler({ id: 's1', exchangeId: 'ex1', symbol: 'ETH/USDT:USDT' })
+
+    expect(mockApi).toHaveBeenCalledWith('/api/user-strategies/s1/validate', { method: 'POST', body: { exchangeId: 'ex1', symbol: 'ETH/USDT:USDT' } })
+    const body = await jsonOf(result)
+    expect(body.versionId).toBe('v2')
+    expect(body.status).toBe('running')
+  })
+
+  it('falls back to a running status and a poll hint when the API response omits them', async () => {
+    mockApi.mockResolvedValue({ versionId: 'v2' })
+
+    const handler = getToolHandler('validate_strategy_version')
+    const result = await handler({ id: 's1', exchangeId: 'ex1', symbol: 'ETH/USDT:USDT' })
+
+    const body = await jsonOf(result)
+    expect(body.status).toBe('running')
+    expect(body.message).toContain('list_strategy_versions')
+  })
+
+  it('surfaces a real ApiError (e.g. not the author) instead of a generic failure', async () => {
+    mockApi.mockRejectedValue(new ApiError(403, 'HTTP_403', 'Forbidden', false))
+
+    const handler = getToolHandler('validate_strategy_version')
+    const result = await handler({ id: 's1', exchangeId: 'ex1', symbol: 'ETH/USDT:USDT' })
+
+    expect(result.isError).toBe(true)
+  })
+})
+
+describe('promote_strategy_version', () => {
+  it('POSTs versionId/channel to the promote endpoint', async () => {
+    mockApi.mockResolvedValue({ success: true, message: 'Version promoted to stable' })
+
+    const handler = getToolHandler('promote_strategy_version')
+    const result = await handler({ id: 's1', versionId: 'v2', channel: 'stable' })
+
+    expect(mockApi).toHaveBeenCalledWith('/api/tradedroid/strategies/s1/versions/promote', { method: 'POST', body: { versionId: 'v2', channel: 'stable' } })
+    const body = await jsonOf(result)
+    expect(body.success).toBe(true)
+    expect(body.message).toBe('Version promoted to stable')
+  })
+
+  it('surfaces the real 400 when the version has not passed validation yet', async () => {
+    mockApi.mockRejectedValue(new ApiError(400, 'HTTP_400', 'Cannot promote to stable: version must pass validation first', false))
+
+    const handler = getToolHandler('promote_strategy_version')
+    const result = await handler({ id: 's1', versionId: 'v2', channel: 'stable' })
+
+    expect(result.isError).toBe(true)
+    const body = JSON.parse(result.content[0].text)
+    expect(body.error.message).toContain('must pass validation first')
+  })
+
+  it('promotes to beta with no validation-status assumption baked into the tool itself', async () => {
+    mockApi.mockResolvedValue({ success: true, message: 'Version promoted to beta' })
+
+    const handler = getToolHandler('promote_strategy_version')
+    await handler({ id: 's1', versionId: 'v2', channel: 'beta' })
+
+    expect(mockApi).toHaveBeenCalledWith('/api/tradedroid/strategies/s1/versions/promote', { method: 'POST', body: { versionId: 'v2', channel: 'beta' } })
+  })
+})

@@ -163,7 +163,7 @@ export function registerStrategyTools(server: McpServer) {
 
   server.tool(
     'update_strategy',
-    'Update one of your own strategies: metadata (name, description, category, market, tags) and/or its code. Writing `code` creates or updates a DRAFT version — the currently stable/live version keeps running unaffected until you explicitly promote the draft with `status`. Use get_strategy first to see current values and status. Get the strategy ID from list_strategies(owned:true); non-admins cannot edit a suspended strategy.',
+    'Update one of your own strategies: metadata (name, description, category, market, tags) and/or its code. Writing `code` creates or updates a DRAFT version — the currently stable/live version keeps running unaffected. NOTE: `status` here only changes the strategy\'s publish/visibility state (draft->testing->live->listed) -- it does NOT promote a new code version to the stable channel bots actually run. To ship a code change to already-deployed bots, validate the new version with validate_strategy_version, then promote it with promote_strategy_version. Use get_strategy first to see current values and status. Get the strategy ID from list_strategies(owned:true); non-admins cannot edit a suspended strategy.',
     {
       id: z.string().describe('Strategy ID to update, obtained from list_strategies(owned:true) or get_strategy.'),
       name: z.string().optional().describe('New display name. Omit to leave unchanged.'),
@@ -230,5 +230,67 @@ export function registerStrategyTools(server: McpServer) {
 
     // If the response is just text/content, return it as-is
     return { content: [{ type: 'text' as const, text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] }
+  }))
+
+  // Extract a version's id whether the field came back as a raw ID string
+  // or a populated { id/_id, ... } object -- the two strategy endpoints
+  // (owner-authoritative vs marketplace) aren't consistent about which.
+  const versionId = (v: unknown): string => {
+    if (v && typeof v === 'object') return String((v as any).id || (v as any)._id || '')
+    return v ? String(v) : ''
+  }
+
+  server.tool('list_strategy_versions', 'List the version history for one of your own official/authored TradeDroid strategies: every stored version with its validation status, and which channel (if any) it currently serves -- \'stable\' is what every bot without a channel override actually runs, \'beta\' and \'latest\' are not live to bots. Use this to check whether a version you validated has passed, and to find the exact version ID to pass to promote_strategy_version. Read-only. Get the strategy ID from list_strategies(owned:true) or get_strategy.', {
+    id: z.string().describe('Strategy ID, obtained from list_strategies(owned:true) or get_strategy.'),
+  }, { title: 'List Strategy Versions', readOnlyHint: true }, withErrorHandling(async ({ id }) => {
+    const [versionsRaw, strategyRaw] = await Promise.all([
+      api<any>(`/api/tradedroid/strategies/${id}/versions`),
+      api<any>(`/api/user-strategies/${id}`),
+    ])
+    const versions = versionsRaw.docs || []
+    const strategy = strategyRaw.data || strategyRaw
+    const stableId = versionId(strategy.stableVersion)
+    const betaId = versionId(strategy.betaVersion)
+    const latestId = versionId(strategy.latestVersion)
+
+    return jsonResult({
+      strategyId: id,
+      strategyName: strategy.name,
+      versions: versions.map((v: any) => ({
+        id: v.id,
+        version: v.semanticVersion || v.version,
+        versionType: v.versionType,
+        validationStatus: v.validationStatus || 'pending',
+        validatedAt: v.validatedAt,
+        createdAt: v.createdAt,
+        changelog: v.changelog,
+        channel: v.id === stableId ? 'stable' : v.id === betaId ? 'beta' : v.id === latestId ? 'latest' : undefined,
+      })),
+    })
+  }))
+
+  server.tool('validate_strategy_version', 'Run TradeDroid\'s automated validation pipeline (syntax check, entry/exit logic check, quick real-data backtest) against the current latest/draft version of one of your own strategies. Required before that version can be promoted to the stable channel with promote_strategy_version -- promotion to stable is rejected until this passes. Async: this only starts the job, which can take from a few seconds up to ~1-2 minutes. Poll list_strategy_versions afterward and watch validationStatus go pending -> running -> passed|failed. Get the strategy ID from list_strategies(owned:true); get exchangeId from list_exchanges (any exchange you own works -- it only sources real historical candles for the backtest, no real orders are placed).', {
+    id: z.string().describe('Strategy ID whose latest/draft version to validate, obtained from list_strategies(owned:true) or get_strategy.'),
+    exchangeId: z.string().describe('An exchange you own (paper or live), obtained from list_exchanges. Used only to source historical candle data for the validation backtest.'),
+    symbol: z.string().describe('Trading pair to validate against, e.g. "ETH/USDT:USDT".'),
+  }, { title: 'Validate Strategy Version', readOnlyHint: false, destructiveHint: false, idempotentHint: false }, withErrorHandling(async ({ id, exchangeId, symbol }) => {
+    const raw = await api<any>(`/api/user-strategies/${id}/validate`, { method: 'POST', body: { exchangeId, symbol } })
+    return jsonResult({
+      versionId: raw.versionId,
+      status: raw.status || 'running',
+      message: raw.message || 'Validation started. Poll list_strategy_versions to see when validationStatus flips to passed/failed.',
+    })
+  }))
+
+  server.tool('promote_strategy_version', 'Promote a specific version of one of your own official/authored TradeDroid strategies to the stable or beta channel. Promoting to STABLE is the step that actually changes the code every bot on the default channel runs -- editing a strategy (update_strategy) or validating a version has NO effect on already-deployed bots until this is called. Promoting to stable requires that version\'s validationStatus already be \'passed\' (run validate_strategy_version first, confirm with list_strategy_versions) -- rejected with a 400 otherwise. \'beta\' has no validation gate. Confirm with the user before calling: this is an immediate, broad change affecting every bot on that channel at once, not just one bot.', {
+    id: z.string().describe('Strategy ID, obtained from list_strategies(owned:true) or get_strategy.'),
+    versionId: z.string().describe('The specific version ID to promote, obtained from list_strategy_versions.'),
+    channel: z.enum(['stable', 'beta']).describe('Which channel to promote into. \'stable\' is what default bots run and requires validationStatus:\'passed\' on this version; \'beta\' has no validation gate.'),
+  }, { title: 'Promote Strategy Version', readOnlyHint: false, destructiveHint: true, idempotentHint: true }, withErrorHandling(async ({ id, versionId: vId, channel }) => {
+    const raw = await api<any>(`/api/tradedroid/strategies/${id}/versions/promote`, { method: 'POST', body: { versionId: vId, channel } })
+    return jsonResult({
+      success: raw.success !== false,
+      message: raw.message || `Version promoted to ${channel}.`,
+    })
   }))
 }
