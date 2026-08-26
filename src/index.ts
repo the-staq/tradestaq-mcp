@@ -12,6 +12,7 @@ import { registerAuthTools } from './tools/auth.js'
 import { registerMarketTools } from './tools/market.js'
 import { registerPortfolioTools } from './tools/portfolio.js'
 import { registerStrategyTools } from './tools/strategy.js'
+import { registerStrategyLabTools } from './tools/strategy-lab.js'
 import { registerBacktestTools } from './tools/backtest.js'
 import { registerBotTools } from './tools/bot.js'
 import { registerTradeTools } from './tools/trades.js'
@@ -36,6 +37,7 @@ function createServer(transport: 'http' | 'stdio'): McpServer {
   registerMarketTools(server)
   registerPortfolioTools(server)
   registerStrategyTools(server)
+  registerStrategyLabTools(server)
   registerBacktestTools(server)
   registerBotTools(server)
   registerTradeTools(server)
