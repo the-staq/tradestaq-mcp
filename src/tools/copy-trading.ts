@@ -14,21 +14,30 @@ export function registerCopyTradingTools(server: McpServer) {
       limit: z.number().min(1).max(50).default(10).describe('Number of traders to return (max 50)'),
     },
     withErrorHandling(async ({ period, sortBy, limit }) => {
+      // /api/masters is the actual copy-trading "traders you can subscribe to
+      // follow" listing -- /api/leaderboard (used previously) is the general
+      // bot-performance leaderboard, a different endpoint with a different
+      // response shape (nested `metrics.<period>.*`, no owner/pricing/follower
+      // data at all), so every field below except rank came back undefined.
       const params = new URLSearchParams({ period, sortBy, limit: String(limit) })
-      const data = await api<any>(`/api/leaderboard?${params}`)
-      const traders = data.traders || data.docs || []
+      const data = await api<any>(`/api/masters?${params}`)
+      const traders = data.docs || []
       if (!traders.length) return { content: [{ type: 'text' as const, text: 'No traders found for the selected period.' }] }
-      return jsonResult(traders.map((t: any, i: number) => ({
-        rank: t.rank ?? i + 1,
-        name: t.traderAlias,
-        roi: t.roi,
-        pnl: t.pnl,
-        winRate: t.winRate,
-        totalTrades: t.totalTrades,
-        followers: t.followers,
-        isPaid: t.isPaid,
-        price: t.price,
-      })))
+      return jsonResult(traders.map((t: any, i: number) => {
+        const periodData = t.performance?.periods?.[period]
+        return {
+          rank: i + 1,
+          masterId: t.id,
+          name: t.owner?.traderAlias,
+          roi: periodData?.roi ?? t.performance?.roi,
+          pnl: periodData?.pnl ?? t.performance?.pnl,
+          winRate: periodData?.winRate ?? t.performance?.winRate,
+          totalTrades: periodData?.trades ?? t.performance?.totalTrades,
+          followers: t.followerCount,
+          isPaid: t.pricing?.isFree === false,
+          price: t.pricing?.monthlyPrice,
+        }
+      }))
     }),
   )
 
