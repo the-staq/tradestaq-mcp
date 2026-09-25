@@ -12,7 +12,7 @@ const SCORING_PROFILE_DESCRIPTIONS: Record<string, string> = {
 
 export function registerStrategyLabTools(server: McpServer) {
 
-  server.tool('start_optimization_run', 'Start a Strategy Lab optimization run on one of your own strategies: an AI mutation loop that repeatedly tweaks the strategy code, backtests each variant, and keeps improvements (walk-forward validated: trains on trainSplit of the window, validates on the rest). This is different from generate_strategy -- that writes one strategy from a description; this iteratively improves an EXISTING strategy you already own. Does not create new strategies. Wallet-charging: call once WITHOUT acknowledgeCost to get a cost estimate (no charge, nothing queued), confirm the spend with the user, then call again with acknowledgeCost:true to actually start. Requires the mcp:live OAuth scope. Only one run can be active per user at a time. Improvements are saved to the strategy\'s latestVersion as they\'re found -- never auto-promoted to stable; use promote_strategy_version yourself once you like the result.', {
+  server.tool('start_optimization_run', 'Start a Strategy Lab optimization run on one of your own strategies: an AI mutation loop that repeatedly tweaks the strategy code, backtests each variant, and keeps improvements (walk-forward validated: trains on trainSplit of the window, validates on the rest). This is different from generate_strategy -- that writes one strategy from a description; this iteratively improves an EXISTING strategy you already own. Does not create new strategies. Wallet-charging: call once WITHOUT acknowledgeCost to get a cost estimate (no charge, nothing queued), confirm the spend with the user, then call again with acknowledgeCost:true to actually start. Requires the mcp:live OAuth scope. Only one run can be active per user at a time. Improvements are saved to the strategy\'s latestVersion as they\'re found -- promoted to stable automatically ONLY if autoPromote:true AND the result clears a strict bar (see autoPromote param); otherwise use promote_strategy_version yourself once you like the result.', {
     strategyId: z.string().describe('ID of your own strategy to optimize, from list_strategies(owned:true) or get_strategy.'),
     exchangeId: z.string().describe('An exchange you own (paper or live), from list_exchanges. Used only to source historical candle data.'),
     symbol: z.string().default('BTC/USDT').describe('Trading pair to optimize against.'),
@@ -24,9 +24,10 @@ export function registerStrategyLabTools(server: McpServer) {
     startDate: z.string().optional().describe('ISO date for the start of the backtest window. Defaults to 6 months ago.'),
     endDate: z.string().optional().describe('ISO date for the end of the backtest window. Defaults to now.'),
     trainSplit: z.number().min(0.5).max(0.9).default(0.7).describe('Fraction of the window used for training vs. out-of-sample validation (0.5-0.9).'),
-    aiProvider: z.string().optional().describe('Override the AI provider used for mutations. Omit to use the account default.'),
-    aiModel: z.string().optional().describe('Override the AI model used for mutations. Omit to use the provider default.'),
     userGuidance: z.string().max(2000).optional().describe('Free-text steering for the AI mutations, e.g. "focus on reducing drawdown" (max 2000 chars).'),
+    autoPromote: z.boolean().default(false).describe('If true, automatically promote the run\'s final saved version to the stable channel (what every bot on that strategy actually runs) when the run completes -- skipping the separate promote_strategy_version step. Only takes effect if the run found a real improvement AND the out-of-sample validation score (not just the in-sample experiment scores) also beats the original baseline with no overfit warning; otherwise it\'s left in latestVersion exactly like a normal run, and get_optimization_status.progress.autoPromoteSkippedReason explains why. Confirm with the user before setting this true -- it changes what live bots run without a separate review step, the same way promote_strategy_version does. Default false preserves the old behavior (never auto-promotes).'),
+    searchPresets: z.boolean().default(false).describe('Also search for per-risk-profile PARAMETER PRESETS once the code-mutation loop finishes -- tuning the strategy\'s own knobs separately for each risk profile, then walk-forward validating each winner and publishing the ones that clear the bar. Charged SEPARATELY and per profile on top of the experiment cost, so the estimate returned without acknowledgeCost breaks it out under presetSearch -- show that to the user before confirming. Only runs if the mutation loop actually found an improvement. Requires an admin to have priced it; the request is refused with a clear message if not.'),
+    presetProfiles: z.array(z.enum(['balanced', 'conservative', 'aggressive', 'consistency'])).optional().describe('Which risk profiles the preset search should cover. Omit for all four. Cost scales per profile, so naming one or two is the cheaper option when the user only cares about a particular risk shape. Ignored unless searchPresets is true.'),
     acknowledgeCost: z.boolean().default(false).describe('Set true only after showing the user the estimated cost (from a prior call without this flag, or from check_auth\'s wallet balance) and getting their approval. False (default) returns a cost preview and starts nothing.'),
   }, { title: 'Start Optimization Run', readOnlyHint: false, destructiveHint: true, idempotentHint: false }, withErrorHandling(async (args) => {
     const { strategyId, exchangeId, acknowledgeCost, ...rest } = args
@@ -42,6 +43,10 @@ export function registerStrategyLabTools(server: McpServer) {
         estimatedCost: raw.estimatedCost,
         creditsPerExperiment: raw.creditsPerExperiment,
         maxExperiments: raw.maxExperiments,
+        // Broken out by the API so the user sees WHAT they are approving, not just a
+        // total that silently grew because searchPresets was set. Passing it straight
+        // through: dropping it here would put the per-profile charge back out of sight.
+        presetSearch: raw.presetSearch,
         walletBalance: raw.balance,
         sufficientBalance: raw.sufficient,
       })
@@ -56,7 +61,7 @@ export function registerStrategyLabTools(server: McpServer) {
     })
   }))
 
-  server.tool('get_optimization_status', 'Check progress of a Strategy Lab optimization run started with start_optimization_run. Each experiment (AI mutation + backtest) typically takes 1-2+ minutes, so poll every 15-30 seconds rather than tightly looping. Once savedVersionId appears, that strategy version holds the best result found so far -- inspect it with list_strategy_versions and promote it yourself with promote_strategy_version if you like it; Strategy Lab never does this automatically. A completed or failed run stays queryable for 24 hours.', {
+  server.tool('get_optimization_status', 'Check progress of a Strategy Lab optimization run started with start_optimization_run. Each experiment (AI mutation + backtest) typically takes 1-2+ minutes, so poll every 15-30 seconds rather than tightly looping. Once savedVersionId appears, that strategy version holds the best result found so far -- inspect it with list_strategy_versions. If the run was started with autoPromote:true, check progress.autoPromoted (true if it was actually promoted to stable) and progress.autoPromoteSkippedReason (present and explains why if it wasn\'t); otherwise promote it yourself with promote_strategy_version if you like it. A completed or failed run stays queryable for 24 hours.', {
     jobId: z.string().describe('Job ID returned by start_optimization_run.'),
   }, { title: 'Get Optimization Status', readOnlyHint: true }, withErrorHandling(async ({ jobId }) => {
     const raw = await api<any>(`/api/strategy-lab?jobId=${encodeURIComponent(jobId)}`)

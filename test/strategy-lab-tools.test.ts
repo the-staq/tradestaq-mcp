@@ -52,6 +52,64 @@ describe('start_optimization_run', () => {
     expect(body.jobId).toBeUndefined()
   })
 
+  /*
+   * The preset search is a SEPARATE, per-profile wallet charge on top of the experiment
+   * cost. It was unreachable from MCP for a while: the tool spreads `...rest` into the
+   * request body, but zod strips keys the schema does not declare, so a caller naming
+   * searchPresets had it silently dropped and got an ordinary run at an ordinary price.
+   * Nothing failed, which is why it went unnoticed.
+   */
+  it('forwards searchPresets and presetProfiles to the API', async () => {
+    mockApi.mockResolvedValue({ status: 'cost_estimate', estimatedCost: 13, balance: 25, sufficient: true })
+
+    const handler = getToolHandler('start_optimization_run')
+    await handler({
+      strategyId: 's1', exchangeId: 'e1',
+      searchPresets: true, presetProfiles: ['conservative', 'aggressive'],
+    })
+
+    const body = mockApi.mock.calls[0][1].body
+    expect(body.searchPresets).toBe(true)
+    expect(body.presetProfiles).toEqual(['conservative', 'aggressive'])
+  })
+
+  it('surfaces the per-profile preset charge in the cost preview', async () => {
+    // A total that silently grew because a flag was set is exactly what the API breaks
+    // out to avoid; dropping it here would put the charge back out of the user's sight.
+    mockApi.mockResolvedValue({
+      status: 'cost_estimate',
+      estimatedCost: 13,
+      creditsPerExperiment: 0.5,
+      maxExperiments: 20,
+      presetSearch: { requested: true, cost: 3, profiles: ['conservative', 'aggressive'] },
+      balance: 25,
+      sufficient: true,
+    })
+
+    const handler = getToolHandler('start_optimization_run')
+    const body = await jsonOf(await handler({
+      strategyId: 's1', exchangeId: 'e1', searchPresets: true,
+    }))
+
+    expect(body.presetSearch).toEqual({
+      requested: true, cost: 3, profiles: ['conservative', 'aggressive'],
+    })
+  })
+
+  it('never requests a paid preset search unless asked', async () => {
+    /*
+     * Asserted as "not true" rather than "=== false": these tests call the handler
+     * directly, so zod's .default(false) has not been applied and the field arrives
+     * undefined. That is the same thing to the API, which gates on
+     * `body.searchPresets === true` -- and undefined vs false is not the property worth
+     * pinning. Not silently billing a per-profile charge nobody asked for is.
+     */
+    mockApi.mockResolvedValue({ status: 'cost_estimate', estimatedCost: 10, balance: 25, sufficient: true })
+    const handler = getToolHandler('start_optimization_run')
+    await handler({ strategyId: 's1', exchangeId: 'e1' })
+    expect(mockApi.mock.calls[0][1].body.searchPresets).not.toBe(true)
+  })
+
   it('with acknowledgeCost:true, queues the run and returns the jobId', async () => {
     mockApi.mockResolvedValue({
       message: 'Optimization started',
@@ -129,6 +187,26 @@ describe('start_optimization_run', () => {
       trainSplit: 0.8,
       userGuidance: 'focus on reducing drawdown',
     })
+  })
+
+  it('passes autoPromote:true through when explicitly requested', async () => {
+    mockApi.mockResolvedValue({ jobId: 'job-3', estimatedCost: 5, config: {} })
+
+    const handler = getToolHandler('start_optimization_run')
+    await handler({ strategyId: 's1', exchangeId: 'e1', autoPromote: true, acknowledgeCost: true })
+
+    const [, opts] = mockApi.mock.calls[0]
+    expect(opts.body).toMatchObject({ autoPromote: true })
+  })
+
+  it('never forwards autoPromote:true when omitted -- opt-in only (zod applies the false default at the real SDK boundary; this harness calls the handler directly, so the key may be absent rather than explicitly false)', async () => {
+    mockApi.mockResolvedValue({ jobId: 'job-4', estimatedCost: 5, config: {} })
+
+    const handler = getToolHandler('start_optimization_run')
+    await handler({ strategyId: 's1', exchangeId: 'e1', acknowledgeCost: true })
+
+    const [, opts] = mockApi.mock.calls[0]
+    expect(opts.body.autoPromote).not.toBe(true)
   })
 })
 
