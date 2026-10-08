@@ -320,3 +320,60 @@ describe('send_optimization_guidance', () => {
     expect(result.isError).toBe(true)
   })
 })
+
+describe('Strategy Lab tool descriptions (0.3.9: held runs and the out-of-sample verdict)', () => {
+  function getToolDescription(name: string): string {
+    const server = new McpServer(
+      { name: 'test-server', version: '0.0.1' },
+      { capabilities: { logging: {} } },
+    )
+    const toolSpy = vi.spyOn(server, 'tool')
+    registerStrategyLabTools(server)
+    const call = toolSpy.mock.calls.find((c) => c[0] === name)
+    if (!call) throw new Error(`tool ${name} was not registered`)
+    return call[1] as unknown as string
+  }
+
+  function getParamDescription(tool: string, param: string): string {
+    const server = new McpServer(
+      { name: 'test-server', version: '0.0.1' },
+      { capabilities: { logging: {} } },
+    )
+    const toolSpy = vi.spyOn(server, 'tool')
+    registerStrategyLabTools(server)
+    const call = toolSpy.mock.calls.find((c) => c[0] === tool)
+    if (!call) throw new Error(`tool ${tool} was not registered`)
+    const shape = call[2] as unknown as Record<string, { description?: string }>
+    return shape[param]?.description ?? ''
+  }
+
+  it('start_optimization_run no longer promises in-loop latestVersion saves and explains held runs', () => {
+    const desc = getToolDescription('start_optimization_run')
+    expect(desc).not.toContain("as they're found")
+    expect(desc).toContain('heldVersionId')
+    expect(desc).toContain('heldBecause')
+    expect(desc).toContain('progress.verdict')
+    expect(desc).toContain('inconclusive')
+  })
+
+  it('autoPromote requires a passing verdict, profitable OOS results and no stable regression', () => {
+    const desc = getParamDescription('start_optimization_run', 'autoPromote')
+    expect(desc).toContain('passing verdict')
+    expect(desc).toContain('profitable out of sample')
+    expect(desc).toContain('current stable version')
+    expect(desc).not.toContain('left in latestVersion')
+  })
+
+  it('get_optimization_status explains verdict, heldVersionId, cancelled and stopReason', () => {
+    const desc = getToolDescription('get_optimization_status')
+    for (const field of ['verdict', 'heldVersionId', 'heldBecause', 'cancelled', 'stopReason']) {
+      expect(desc).toContain(field)
+    }
+  })
+
+  it('cancel_optimization_run no longer claims the improvement stays saved to latestVersion', () => {
+    const desc = getToolDescription('cancel_optimization_run')
+    expect(desc).not.toContain('stays saved')
+    expect(desc).toContain('HELD')
+  })
+})

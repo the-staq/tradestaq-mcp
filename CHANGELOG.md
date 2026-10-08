@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.9] - 2026-10-08
+
+### Changed
+- **Strategy Lab tool descriptions now match how runs finish (text only, no request or response changes).** The server now checks a run's best version out of sample before moving the strategy's `latestVersion`, and the old text promised that "improvements are saved to the strategy's latestVersion as they're found", which is no longer true.
+  - `start_optimization_run`: the best version becomes `latestVersion` only if it passes the out-of-sample check (single-pair runs: also when the check is inconclusive). Otherwise the version is held, `latestVersion` and the bots following it stay as they were, and `get_optimization_status` shows `progress.verdict`, `progress.heldBecause` and `progress.heldVersionId` (with no `savedVersionId`). The strategy author can accept a held version in the web app ("Use this version anyway").
+  - `autoPromote`: requires a passing verdict, profitable out-of-sample results and no regression against the current stable version. An inconclusive check never auto-promotes.
+  - `get_optimization_status`: explains `verdict`, `heldVersionId` / `heldBecause`, `cancelled` and `stopReason`, and that `savedVersionId` during a run is not yet `latestVersion`.
+  - `cancel_optimization_run`: a cancelled run's best version is kept but held, not saved to `latestVersion`.
+- Ship this only after the matching TradeStaq web release (held runs and the out-of-sample verdict) is live.
+
 ## [0.3.8] - 2026-07-10
 
 ### Fixed
