@@ -21,21 +21,24 @@ const QUOTE_FIELDS = [
 const QUOTE_CHANGED_REASONS = new Set(['params_changed', 'price_increased', 'quote_expired', 'foreign_quote'])
 
 /**
- * Pairs to send, primary first: `symbol` (when given) leads, then `symbols` in order,
- * deduped case-insensitively keeping the first spelling. Undefined when `symbols` was not
- * given, so the legacy scalar body is sent unchanged.
+ * Pairs to send, primary first: `symbols` deduped case-insensitively keeping the first
+ * spelling. `symbol` only picks the primary: when it matches a listed pair (any case) that
+ * pair leads, in `symbol`'s spelling, as the server does; otherwise it is ignored, so this
+ * never sends a pair the caller did not list. Undefined when `symbols` was not given, so the
+ * legacy scalar body is sent unchanged.
  */
 export function basketSymbols(symbol: string | undefined, symbols: string[] | undefined): string[] | undefined {
   if (!symbols) return undefined
   const seen = new Set<string>()
-  const out: string[] = []
-  for (const s of symbol !== undefined ? [symbol, ...symbols] : symbols) {
+  const deduped: string[] = []
+  for (const s of symbols) {
     const key = s.toUpperCase()
     if (seen.has(key)) continue
     seen.add(key)
-    out.push(s)
+    deduped.push(s)
   }
-  return out
+  if (symbol === undefined || !seen.has(symbol.toUpperCase())) return deduped
+  return [symbol, ...deduped.filter((s) => s.toUpperCase() !== symbol.toUpperCase())]
 }
 
 function costEstimateResult(raw: any, message: string) {
@@ -87,7 +90,7 @@ export function registerStrategyLabTools(server: McpServer) {
   server.tool('start_optimization_run', 'Start a Strategy Lab optimization run on one of your own strategies: an AI mutation loop that repeatedly tweaks the strategy code, backtests each variant, and keeps improvements (walk-forward validated: trains on trainSplit of the window, validates on the rest). This is different from generate_strategy -- that writes one strategy from a description; this iteratively improves an EXISTING strategy you already own. Does not create new strategies. Wallet-charging: call once WITHOUT acknowledgeCost to get a cost estimate (no charge, nothing queued), confirm the spend with the user, then call again with acknowledgeCost:true to actually start. Requires the mcp:live OAuth scope. Only one run can be active per user at a time. When the run finishes, its best version is checked out of sample (on the part of the window it was not trained on). The best version becomes the strategy\'s latestVersion ONLY if it passes that check (single-pair runs: also when the check is inconclusive, e.g. too few out-of-sample trades). Otherwise -- it failed the check, or the run was cancelled -- the version is HELD: latestVersion and the bots following it are not changed, and get_optimization_status shows progress.verdict, progress.heldBecause and progress.heldVersionId (savedVersionId is absent). The strategy author can still accept a held version in the TradeStaq web app ("Use this version anyway"). Promoted to stable automatically ONLY if autoPromote:true AND the result clears a strict bar (see autoPromote param); otherwise use promote_strategy_version yourself once you like the result. MULTI-PAIR (basket) RUNS: pass symbols (primary first) to test every candidate on several pairs of the same exchange account and market type, so the result is not tuned to one chart. Pricing is the base per experiment plus an extra charge per extra pair per experiment, billed per pair actually evaluated. A multi-pair request always returns a cost_estimate first with a quoteId, the pairs, the maximum cost and estimatedMinutes; the quote is a maximum, and a run time limit may cut experiments (clampedFrom, expectedExperimentsWithinBudget). Confirm by calling again with the same arguments plus acknowledgeCost:true and that quoteId (or acknowledgedCost). If the response has quoteChanged:true, show the new estimate and confirm again with its new quoteId. A multi-pair run passes only if the best version beats the original on most pairs, wrecks no pair, and loses money out of sample on no pair; otherwise it is held (an inconclusive check also holds a multi-pair run), and get_optimization_status shows the per-pair results.', {
     strategyId: z.string().describe('ID of your own strategy to optimize, from list_strategies(owned:true) or get_strategy.'),
     exchangeId: z.string().describe('An exchange you own (paper or live), from list_exchanges. Used only to source historical candle data.'),
-    symbol: z.string().optional().describe('Trading pair to optimize against. Defaults to BTC/USDT when symbols is not given. With symbols, this pair (if given) becomes the primary pair.'),
+    symbol: z.string().optional().describe('Trading pair to optimize against. Defaults to BTC/USDT when symbols is not given. With symbols, it only picks the primary pair, and only when it is one of symbols (otherwise it is ignored); prefer omitting it and listing the primary first in symbols.'),
     symbols: z.array(z.string()).min(1).max(8).optional().describe('Pairs to test on, primary first, all on the same exchange account and market type, e.g. ["BTC/USDT","ETH/USDT","SOL/USDT"]. More than one pair tests every candidate on every pair (a multi-pair run, priced per extra pair per experiment and confirmed with quoteId). Capped by the user\'s plan (Free 1 / Pro 3 / Trader 4 / Whale 5, system cap 5) and only available when the server has multi-pair runs on; a request over the cap is refused with code too_many_assets, maxAssets and an upgrade hint. Not combinable with searchPresets. Omit for a single-pair run.'),
     timeframe: z.string().default('1h').describe('Candle timeframe, e.g. "1h", "4h", "1d".'),
     maxExperiments: z.number().int().min(1).max(30).default(20).describe('How many mutate-and-backtest experiments to run (1-30). Cost scales linearly with this -- fewer experiments for a quick/cheap check, more for a thorough search.'),

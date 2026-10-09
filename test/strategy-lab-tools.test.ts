@@ -253,6 +253,25 @@ describe('start_optimization_run multi-pair (0.4.0)', () => {
     expect('symbol' in bodyOf()).toBe(false)
   })
 
+  it('ignores a symbol that is not one of symbols instead of adding it', async () => {
+    mockApi.mockResolvedValue({ status: 'cost_estimate', estimatedCost: 10, balance: 25, sufficient: true })
+    const handler = getToolHandler('start_optimization_run')
+    await handler({ strategyId: 's1', exchangeId: 'e1', symbol: 'BTC/USDT', symbols: ['ETH/USDT'] })
+
+    expect(bodyOf().symbol).toBe('ETH/USDT')
+    expect('symbols' in bodyOf()).toBe(false)
+  })
+
+  it('sends exactly the listed 8 pairs when an unlisted symbol is also given', async () => {
+    mockApi.mockResolvedValue({ status: 'cost_estimate', estimatedCost: 40, balance: 25, sufficient: false, quoteId: 'q-1' })
+    const handler = getToolHandler('start_optimization_run')
+    const symbols = ['A/USDT', 'B/USDT', 'C/USDT', 'D/USDT', 'E/USDT', 'F/USDT', 'G/USDT', 'H/USDT']
+    await handler({ strategyId: 's1', exchangeId: 'e1', symbol: 'BTC/USDT', symbols })
+
+    expect(bodyOf().symbols).toEqual(symbols)
+    expect('symbol' in bodyOf()).toBe(false)
+  })
+
   it('sends a one-pair symbols list as a plain single-pair run', async () => {
     mockApi.mockResolvedValue({ status: 'cost_estimate', estimatedCost: 10, balance: 25, sufficient: true })
     const handler = getToolHandler('start_optimization_run')
