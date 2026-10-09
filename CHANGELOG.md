@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Preset search on multi-pair runs (text only, no request changes).** `symbols` no longer says it is not combinable with `searchPresets`: once an admin prices the multi-pair preset search, every preset candidate is tested on every pair, each searched profile costs the per-profile price plus an extra charge per extra pair (under `presetSearch` / `costBreakdown.presetSearch` in the quoteId estimate, which already pass through), and it is billed only if the search finishes. Until then the server refuses it with `preset_search_single_pair_only`, as today.
+- **`profilesThatFit` on `basket_too_slow`.** When a multi-pair run with `searchPresets` is too slow, the server now also says how many risk profiles still fit at the same pairs and window (`0` = drop `searchPresets`), and its message suggests searching fewer profiles. It is added to the allowlisted basket error details, so an agent is no longer steered only toward fewer pairs.
+- Ship this only after the TradeStaq web release with the basket preset search is live.
+
 ## [0.4.0] - 2026-10-09
 
 ### Added

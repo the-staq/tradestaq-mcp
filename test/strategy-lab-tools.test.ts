@@ -415,6 +415,12 @@ describe('start_optimization_run multi-pair (0.4.0)', () => {
     }))
     ;({ error } = await jsonOf(await handler({ strategyId: 's1', exchangeId: 'e1', symbols: ['ETH/USDT', 'BTC/USDT', 'SOL/USDT'] })))
     expect(error).toEqual({ code: 'basket_too_slow', message: 'too slow', retryable: false, maxAssetsThatFit: 2, maxDaysThatFit: 90 })
+
+    mockApi.mockRejectedValue(new ApiError(400, 'HTTP_400', 'too slow', false, undefined, {
+      code: 'basket_too_slow', maxAssetsThatFit: 1, maxDaysThatFit: 136, profilesThatFit: 1,
+    }))
+    ;({ error } = await jsonOf(await handler({ strategyId: 's1', exchangeId: 'e1', symbols: ['ETH/USDT', 'BTC/USDT'], searchPresets: true })))
+    expect(error).toEqual({ code: 'basket_too_slow', message: 'too slow', retryable: false, maxAssetsThatFit: 1, maxDaysThatFit: 136, profilesThatFit: 1 })
   })
 
   it('leaves other errors to the generic handler', async () => {
@@ -622,6 +628,9 @@ describe('Strategy Lab tool descriptions (0.3.9 held runs and the out-of-sample 
     expect(desc).toContain('quoteChanged')
     expect(getParamDescription('start_optimization_run', 'symbols')).toContain('Free 1 / Pro 3 / Trader 4 / Whale 5')
     expect(getParamDescription('start_optimization_run', 'symbols')).toContain('searchPresets')
+    expect(getParamDescription('start_optimization_run', 'symbols')).not.toContain('Not combinable')
+    expect(getParamDescription('start_optimization_run', 'searchPresets')).toContain('every candidate is tested on every pair')
+    expect(getParamDescription('start_optimization_run', 'searchPresets')).toContain('billed only if the search finishes')
     expect(getParamDescription('start_optimization_run', 'symbol')).toContain('BTC/USDT')
     expect(getParamDescription('start_optimization_run', 'quoteId')).not.toBe('')
     expect(getParamDescription('start_optimization_run', 'acknowledgedCost')).not.toBe('')
