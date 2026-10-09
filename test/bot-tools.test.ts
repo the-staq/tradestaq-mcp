@@ -90,6 +90,25 @@ describe('get_bot_status', () => {
       openPosition: { symbol: 'BTC/USDC:USDC', side: 'long' },
     })
   })
+
+  it('shows the stop-after-close flag when the bot has one', async () => {
+    mockApi.mockResolvedValue({
+      doc: {
+        id: 'bot-1', status: 'active',
+        stopAfterClose: { enabled: true, requestedAt: '2026-10-09T09:00:00.000Z', requestedBy: 'user-1' },
+      },
+    })
+    const result = await getToolHandler('get_bot_status')({ id: 'bot-1' })
+    expect((await jsonOf(result)).stopAfterClose).toEqual({ enabled: true, requestedAt: '2026-10-09T09:00:00.000Z' })
+  })
+
+  it('reports completedAt after the bot paused itself', async () => {
+    mockApi.mockResolvedValue({
+      doc: { id: 'bot-1', status: 'paused', stopAfterClose: { enabled: false, requestedAt: '2026-10-09T09:00:00.000Z', completedAt: '2026-10-09T10:00:00.000Z' } },
+    })
+    const result = await getToolHandler('get_bot_status')({ id: 'bot-1' })
+    expect((await jsonOf(result)).stopAfterClose).toEqual({ enabled: false, requestedAt: '2026-10-09T09:00:00.000Z', completedAt: '2026-10-09T10:00:00.000Z' })
+  })
 })
 
 describe('deploy_bot', () => {
@@ -235,13 +254,80 @@ describe('update_bot', () => {
   })
 
   it('rejects a call with no fields to update instead of sending an empty PATCH', async () => {
-    mockApi.mockResolvedValueOnce({ doc: { id: 'bot-1' } })
+    mockApi.mockResolvedValue({ doc: { id: 'bot-1' } })
 
     const handler = getToolHandler('update_bot')
     const result = await handler({ id: 'bot-1' })
 
     expect(result.isError).toBe(true)
+    expect(mockApi).not.toHaveBeenCalledWith('/api/bots/bot-1', expect.objectContaining({ method: 'PATCH' }))
+  })
+
+  it('stopAfterClose:true is sent as-is in the PATCH body, with no fetch-and-merge GET first', async () => {
+    mockApi.mockResolvedValueOnce({ doc: { id: 'bot-1', status: 'active', stopAfterClose: { enabled: true } } })
+
+    const handler = getToolHandler('update_bot')
+    const result = await handler({ id: 'bot-1', stopAfterClose: true })
+
     expect(mockApi).toHaveBeenCalledTimes(1)
+    expect(mockApi).toHaveBeenCalledWith('/api/bots/bot-1', { method: 'PATCH', body: { stopAfterClose: true } })
+    const text = await textOf(result)
+    expect(text).toContain('pause after its current position closes')
+    expect(text).toContain('no new entries')
+  })
+
+  it('stopAfterClose:true on a bot that is already flat reports it paused immediately', async () => {
+    mockApi.mockResolvedValueOnce({ doc: { id: 'bot-1', status: 'paused', stopAfterClose: { enabled: false, completedAt: '2026-10-09T10:00:00.000Z' } } })
+
+    const handler = getToolHandler('update_bot')
+    const result = await handler({ id: 'bot-1', stopAfterClose: true })
+
+    expect(await textOf(result)).toContain('already flat, so it is now paused')
+  })
+
+  it('stopAfterClose:true on a flat signal bot reports its resting status (stopped)', async () => {
+    mockApi.mockResolvedValueOnce({ doc: { id: 'bot-1', status: 'stopped', stopAfterClose: { enabled: false } } })
+
+    const handler = getToolHandler('update_bot')
+    const result = await handler({ id: 'bot-1', stopAfterClose: true })
+
+    expect(await textOf(result)).toContain('now stopped')
+  })
+
+  it('stopAfterClose:false cancels a pending stop-after-close', async () => {
+    mockApi.mockResolvedValueOnce({ doc: { id: 'bot-1', status: 'active', stopAfterClose: { enabled: false } } })
+
+    const handler = getToolHandler('update_bot')
+    const result = await handler({ id: 'bot-1', stopAfterClose: false })
+
+    expect(mockApi).toHaveBeenCalledWith('/api/bots/bot-1', { method: 'PATCH', body: { stopAfterClose: false } })
+    expect(await textOf(result)).toContain('stop after close: cancelled')
+  })
+
+  it('combines stopAfterClose with a risk change in one PATCH (GET only for the merged group)', async () => {
+    mockApi
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', positionSizing: { type: 'percentage', value: 10, leverage: 2 } } })
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', status: 'active' } })
+
+    const handler = getToolHandler('update_bot')
+    await handler({ id: 'bot-1', leverage: 3, stopAfterClose: true })
+
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/bots/bot-1', {
+      method: 'PATCH',
+      body: { positionSizing: { type: 'percentage', value: 10, leverage: 3 }, stopAfterClose: true },
+    })
+  })
+
+  it('describes stopAfterClose in the schema', () => {
+    const server = new McpServer({ name: 't', version: '0' }, { capabilities: {} })
+    const toolSpy = vi.spyOn(server, 'tool')
+    registerBotTools(server)
+    const call = toolSpy.mock.calls.find((c) => c[0] === 'update_bot')!
+    const desc = String(call[1])
+    expect(desc).toContain('stopAfterClose')
+    const schema = call[2] as Record<string, any>
+    expect(schema.stopAfterClose.description).toMatch(/no new entries/)
+    expect(schema.stopAfterClose.description).toMatch(/immediately if already flat/)
   })
 })
 
@@ -259,6 +345,16 @@ describe('start_bot / stop_bot', () => {
     const handler = getToolHandler('stop_bot')
     await handler({ id: 'bot-1' })
     expect(mockApi).toHaveBeenCalledWith('/api/bots/bot-1/status', { method: 'PATCH', body: { status: 'stopped' } })
+  })
+
+  it('stop_bot description says positions are left unmanaged and points to update_bot stopAfterClose', () => {
+    const server = new McpServer({ name: 't', version: '0' }, { capabilities: {} })
+    const toolSpy = vi.spyOn(server, 'tool')
+    registerBotTools(server)
+    const desc = String(toolSpy.mock.calls.find((c) => c[0] === 'stop_bot')![1])
+    expect(desc).not.toContain('stops opening new positions')
+    expect(desc).toContain('unmanaged')
+    expect(desc).toContain('stopAfterClose')
   })
 })
 

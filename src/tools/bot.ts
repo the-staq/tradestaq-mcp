@@ -18,6 +18,15 @@ function strategyNameOf(bot: any): string | undefined {
   return typeof bot.strategy === 'string' ? bot.strategy : undefined
 }
 
+// Only the fields an agent needs; requestedBy (a user id) is left out.
+function stopAfterCloseView(v: any): { enabled: boolean, requestedAt?: string, completedAt?: string } {
+  return {
+    enabled: v?.enabled === true,
+    ...(typeof v?.requestedAt === 'string' ? { requestedAt: v.requestedAt } : {}),
+    ...(typeof v?.completedAt === 'string' ? { completedAt: v.completedAt } : {}),
+  }
+}
+
 export function registerBotTools(server: McpServer) {
 
   server.tool('list_bots', 'List all your trading bots with status and performance.', {}, withErrorHandling(async () => {
@@ -36,7 +45,7 @@ export function registerBotTools(server: McpServer) {
     }))
   }))
 
-  server.tool('get_bot_status', 'Get detailed status, configuration, and live performance for a specific trading bot by ID. Returns its run status, the strategy/symbol/exchange it trades, whether it is paper or live, P&L, win rate, total trades, and risk config (leverage, stop-loss, take-profit). Use it to check how a deployed bot is doing. Read-only — to stop a bot use stop_bot. Get bot IDs from list_bots.', {
+  server.tool('get_bot_status', 'Get detailed status, configuration, and live performance for a specific trading bot by ID. Returns its run status, the strategy/symbol/exchange it trades, whether it is paper or live, P&L, win rate, total trades, and risk config (leverage, stop-loss, take-profit). Use it to check how a deployed bot is doing. stopAfterClose.enabled = true means the bot will pause itself once its current position closes (set with update_bot); completedAt is when it last did. Read-only — to stop a bot use stop_bot or update_bot stopAfterClose. Get bot IDs from list_bots.', {
     id: z.string().describe('The bot ID to inspect, obtained from list_bots.'),
   }, { title: 'Get Bot Status', readOnlyHint: true }, withErrorHandling(async ({ id }) => {
     const raw = await api<any>(`/api/bots/${id}`)
@@ -61,6 +70,7 @@ export function registerBotTools(server: McpServer) {
         takeProfit: data.positionSizing?.takeProfit,
       },
       openPosition: data.openPosition,
+      ...(data.stopAfterClose ? { stopAfterClose: stopAfterCloseView(data.stopAfterClose) } : {}),
     })
   }))
 
@@ -134,7 +144,7 @@ export function registerBotTools(server: McpServer) {
 
   server.tool(
     'update_bot',
-    'Update a deployed bot\'s risk settings (leverage, position size %, stop loss, take profit) and/or its trade-notification toggle. Fetches the bot\'s current settings first and merges your changes on top — the underlying PATCH endpoint expects full group objects (positionSizing, messaging/manualMessaging), so a naive partial update would silently wipe out any field you didn\'t mention. Get bot IDs from list_bots; check current values with get_bot_status first.',
+    'Update a deployed bot\'s risk settings (leverage, position size %, stop loss, take profit), its trade-notification toggle, and/or stopAfterClose (a graceful stop: the bot keeps managing its open position, opens no new entries, and pauses itself once flat; the owner is notified once). For risk or notification changes it fetches the bot\'s current settings first and merges your changes on top — the underlying PATCH endpoint expects full group objects (positionSizing, messaging/manualMessaging), so a naive partial update would silently wipe out any field you didn\'t mention. stopAfterClose is a plain top-level field and needs no fetch. Get bot IDs from list_bots; check current values with get_bot_status first.',
     {
       id: z.string().describe('The bot ID to update, obtained from list_bots.'),
       leverage: z.number().min(1).max(125).optional().describe('New leverage. Omit to leave unchanged.'),
@@ -142,15 +152,20 @@ export function registerBotTools(server: McpServer) {
       stopLoss: z.number().optional().describe('New stop loss %. Omit to leave unchanged.'),
       takeProfit: z.number().optional().describe('New take profit %. Omit to leave unchanged.'),
       notifyOnTrade: z.boolean().optional().describe('Whether to send a Telegram notification for each trade this bot executes. Omit to leave unchanged.'),
+      stopAfterClose: z.boolean().optional().describe('true: keep managing the open position, open no new entries, pause automatically once flat (immediately if already flat); false: cancel. Only an active bot can be set. Changing the bot\'s status (start_bot/stop_bot) also cancels it. Omit to leave unchanged.'),
     },
     { title: 'Update Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-    withErrorHandling(async ({ id, leverage, positionSizePercent, stopLoss, takeProfit, notifyOnTrade }) => {
-      const raw = await api<any>(`/api/bots/${id}`)
-      const bot = raw.doc || raw
+    withErrorHandling(async ({ id, leverage, positionSizePercent, stopLoss, takeProfit, notifyOnTrade, stopAfterClose }) => {
       const body: Record<string, unknown> = {}
       const parts: string[] = []
 
       const riskChanged = leverage !== undefined || positionSizePercent !== undefined || stopLoss !== undefined || takeProfit !== undefined
+      // Only the grouped fields need the current bot for fetch-and-merge.
+      let bot: any = {}
+      if (riskChanged || notifyOnTrade !== undefined) {
+        const raw = await api<any>(`/api/bots/${id}`)
+        bot = raw.doc || raw
+      }
       if (riskChanged) {
         const current = bot.positionSizing || { type: 'percentage', value: 10, leverage: 1 }
         const positionSizing = {
@@ -176,11 +191,26 @@ export function registerBotTools(server: McpServer) {
         parts.push(`notifications: ${notifyOnTrade ? 'on' : 'off'}`)
       }
 
+      if (stopAfterClose !== undefined) body.stopAfterClose = stopAfterClose
+
       if (!Object.keys(body).length) {
         throw new ApiError(400, 'NO_CHANGES', 'No fields provided to update.', false)
       }
 
-      await api<any>(`/api/bots/${id}`, { method: 'PATCH', body })
+      const res = await api<any>(`/api/bots/${id}`, { method: 'PATCH', body })
+      if (stopAfterClose !== undefined) {
+        const updated = res?.doc || res || {}
+        const status = typeof updated.status === 'string' ? updated.status : undefined
+        if (!stopAfterClose) {
+          parts.push('stop after close: cancelled')
+        } else if (status && status !== 'active') {
+          // The server settles synchronously: a bot that was already flat
+          // comes back in its resting status in the same response.
+          parts.push(`stop after close: the bot was already flat, so it is now ${status}`)
+        } else {
+          parts.push('stop after close: the bot will keep managing its open position, open no new entries, and pause after its current position closes')
+        }
+      }
       return { content: [{ type: 'text' as const, text: `Bot ${id} updated. ${parts.join(', ')}` }] }
     }),
   )
@@ -192,7 +222,7 @@ export function registerBotTools(server: McpServer) {
     return { content: [{ type: 'text' as const, text: `Bot ${id} activated.` }] }
   }))
 
-  server.tool('stop_bot', 'Stop a running trading bot so it stops opening new positions. Any positions it currently holds stay open — close those separately with close_position. The bot and its config are kept and can be restarted later (with start_bot), so this is a reversible state change, not a delete. Check state first with get_bot_status; find bot IDs with list_bots.', {
+  server.tool('stop_bot', 'Stop a running trading bot immediately. The bot stops trading entirely: any positions it currently holds stay open but are left unmanaged (no stop loss / take profit handling, no strategy exits) — close those separately with close_position. For a graceful stop that keeps managing the open position and pauses once it closes, use update_bot with stopAfterClose: true instead. The bot and its config are kept and can be restarted later (with start_bot), so this is a reversible state change, not a delete. Check state first with get_bot_status; find bot IDs with list_bots.', {
     id: z.string().describe('The bot ID to stop, obtained from list_bots.'),
   }, { title: 'Stop Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: true }, withErrorHandling(async ({ id }) => {
     // PUT /api/bots/:id/status doesn't exist -- the route only exports PATCH.

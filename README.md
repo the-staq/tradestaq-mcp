@@ -143,7 +143,8 @@ Credentials never enter the chat when using the browser flow. Token is stored lo
 | `list_bots` | All bots with status and performance |
 | `get_bot_status` | Detailed bot metrics and config |
 | `deploy_bot` | Deploy a strategy as a trading bot |
-| `stop_bot` | Stop a running bot |
+| `update_bot` | Change risk settings, notifications, or `stopAfterClose` (pause once the current position closes) |
+| `stop_bot` | Stop a running bot now (open positions are left unmanaged) |
 | `close_position` | Close an open position (full or partial) |
 
 `deploy_bot` defaults to paper trading. Pass `live: true` for real money.

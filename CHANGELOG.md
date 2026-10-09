@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+- **`update_bot` `stopAfterClose`.** `true`: the bot keeps managing its open position (SL/TP, DCA exits, strategy exits, close signals), opens no new entries, and pauses itself once flat (immediately if already flat), notifying the owner once; `false`: cancel. Only an active bot can be set, and any status change (start_bot / stop_bot) cancels it. It is sent as-is in the PATCH body, so a `stopAfterClose`-only call no longer does the fetch-and-merge GET first. The reply says whether the bot is waiting for its position to close or was already flat and is now in its resting status (`paused` for strategy bots, `stopped` for signal bots).
+- **`get_bot_status` shows `stopAfterClose`** (`enabled`, `requestedAt`, `completedAt`) when the bot has it.
+
+### Changed
+- **`stop_bot` text corrected.** It said the bot "stops opening new positions"; it actually stops the bot entirely and leaves its open positions unmanaged. It now points to `update_bot stopAfterClose` for a graceful stop.
+- Ship `stopAfterClose` only after the TradeStaq web release with stop-after-close is live (older servers reject the field with `Field "stopAfterClose" is not allowed`).
+
 ### Changed
 - **Preset search on multi-pair runs (text only, no request changes).** `symbols` no longer says it is not combinable with `searchPresets`: once an admin prices the multi-pair preset search, every preset candidate is tested on every pair, each searched profile costs the per-profile price plus an extra charge per extra pair (under `presetSearch` / `costBreakdown.presetSearch` in the quoteId estimate, which already pass through), and it is billed only if the search finishes. Until then the server refuses it with `preset_search_single_pair_only`, as today.
 - **`profilesThatFit` on `basket_too_slow`.** When a multi-pair run with `searchPresets` is too slow, the server now also says how many risk profiles still fit at the same pairs and window (`0` = drop `searchPresets`), and its message suggests searching fewer profiles. It is added to the allowlisted basket error details, so an agent is no longer steered only toward fewer pairs.
