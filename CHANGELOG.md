@@ -7,6 +7,14 @@
 - **`profilesThatFit` on `basket_too_slow`.** When a multi-pair run with `searchPresets` is too slow, the server now also says how many risk profiles still fit at the same pairs and window (`0` = drop `searchPresets`), and its message suggests searching fewer profiles. It is added to the allowlisted basket error details, so an agent is no longer steered only toward fewer pairs.
 - Ship this only after the TradeStaq web release with the basket preset search is live.
 
+### Fixed
+- **Basket quote fields are shape-checked, not just allowlisted.** `quoteId` must be the server's UUID, `assets` 1-8 pair symbols (no whitespace, max 64 chars), `resolved` two ISO dates, `costBreakdown` only its numeric `experiments` / `perExperiment` / `presetSearch` and `perExtraAsset` (number or null), the counts finite numbers, and `presetSearch` only `requested` / `cost` / known `profiles`. Anything else is dropped, so server text can no longer reach the agent through these fields.
+- **Basket 400 codes are allowlisted.** Only the codes the server's POST /api/strategy-lab documents (`invalid_symbols_param`, `baskets_unavailable`, `too_many_assets`, `preset_search_single_pair_only`, `invalid_symbols`, `mixed_basket`, `invalid_run_window`, `basket_window_too_long`, `basket_too_slow`, `basket_preset_search_unavailable`) are returned; any other 400 is `HTTP_400` without details. `mixed_basket` also returns its `symbol` when it is a pair symbol.
+- **Error codes for every tool.** `api()` now also reads a top-level `code` when there is no `error.code`, and accepts either only when it matches `^[a-z0-9_]{1,64}$` (otherwise `HTTP_<status>`). Strategy Lab errors go through the shared error format (`ApiError.fields` + `errorResult`) instead of a second copy of it.
+- **`symbol` with `symbols` is checked.** A `symbol` that is not one of `symbols` is now refused with `symbol_not_in_symbols` before anything is quoted, instead of being silently ignored.
+- **`symbols` cleanup.** Entries are trimmed, empty ones dropped and duplicates removed case-insensitively after trimming; a list that comes down to one pair is a single-pair run, and one with no pairs left is refused with `no_symbols`.
+- The estimate message is chosen by the number of pairs sent, not by whether a `quoteId` came back. The `symbols` cap stays 8, the server's hard maximum (the plan cap and the admin-set system cap, 5 by default, are enforced server side), and its text now says so.
+
 ## [0.4.0] - 2026-10-09
 
 ### Added

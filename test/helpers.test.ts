@@ -6,7 +6,7 @@ vi.mock('../src/api.js', async () => {
   return { ...actual, api: mockApi }
 })
 
-import { jsonResult, withErrorHandling, resolveStrategyName } from '../src/helpers.js'
+import { errorResult, jsonResult, withErrorHandling, resolveStrategyName } from '../src/helpers.js'
 import { ApiError } from '../src/api.js'
 
 beforeEach(() => {
@@ -25,6 +25,26 @@ describe('jsonResult', () => {
 })
 
 describe('withErrorHandling', () => {
+  it('adds ApiError.fields to the error object without letting them replace code, message or retryable', async () => {
+    const handler = withErrorHandling(async () => {
+      throw new ApiError(400, 'too_many_assets', 'too many', false, undefined, { raw: 'body' },
+        { maxAssets: 3, code: 'OVERRIDE', message: 'OVERRIDE', retryable: true, skipped: undefined })
+    })
+    const result = await handler()
+    expect(result.isError).toBe(true)
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      error: { code: 'too_many_assets', message: 'too many', retryable: false, maxAssets: 3 },
+    })
+    expect(result.content[0].text).not.toContain('body')
+  })
+
+  it('errorResult builds the same shape for a local validation error', () => {
+    expect(JSON.parse(errorResult('symbol_not_in_symbols', 'm').content[0].text)).toEqual({
+      error: { code: 'symbol_not_in_symbols', message: 'm', retryable: false },
+    })
+    expect(errorResult('X', 'm').isError).toBe(true)
+  })
+
   it('passes through successful result', async () => {
     const successResult = { content: [{ type: 'text' as const, text: 'ok' }] }
     const handler = withErrorHandling(async () => successResult)

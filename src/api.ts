@@ -11,6 +11,10 @@ export class ApiError extends Error {
     // The parsed JSON error body, for callers that read structured fields (e.g. the
     // Strategy Lab quote_changed envelope). Never dumped into the generic error text.
     public details?: Record<string, unknown>,
+    // Extra structured fields to show the agent next to code/message (withErrorHandling
+    // adds them to the error object). Callers put only allowlisted, shape-checked values
+    // here; never a raw server body.
+    public fields?: Record<string, unknown>,
   ) {
     super(message)
     this.name = 'ApiError'
@@ -18,6 +22,13 @@ export class ApiError extends Error {
 }
 
 const MAX_RETRIES = 2
+
+const SAFE_ERROR_CODE = /^[a-z0-9_]{1,64}$/i
+
+/** A server-provided error code safe to put in front of the agent: a short identifier, nothing else. */
+export function isSafeErrorCode(code: unknown): code is string {
+  return typeof code === 'string' && SAFE_ERROR_CODE.test(code)
+}
 
 // Backoff between retries. Skipped under Vitest so the test suite stays fast
 // while production still waits out rate limits / transient 5xx.
@@ -211,7 +222,10 @@ export async function api<T = unknown>(
           )
         }
 
-        const code = parseOk ? (data?.error?.code ?? `HTTP_${res.status}`) : `HTTP_${res.status}`
+        // The machine-readable code: `error.code` (nested envelope) or a top-level `code`
+        // (e.g. the Strategy Lab basket 400s). It reaches the agent's context, so only a
+        // short identifier is accepted; anything else falls back to HTTP_<status>.
+        const code = (parseOk ? [data?.error?.code, data?.code].find(isSafeErrorCode) : undefined) ?? `HTTP_${res.status}`
         const message = parseOk
           ? (data?.error?.message ?? data?.error ?? data?.message ?? `API returned ${res.status}`)
           : `API returned ${res.status} with a non-JSON response`

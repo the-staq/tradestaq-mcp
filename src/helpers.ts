@@ -32,19 +32,34 @@ export async function resolveStrategyName(id: string): Promise<string> {
   return id
 }
 
+/**
+ * The one error result shape every tool returns: `{ error: { code, message, retryable,
+ * retryAfterMs?, ...fields } }`. `fields` must already be allowlisted by the caller.
+ */
+export function errorResult(
+  code: string,
+  message: string,
+  { retryable = false, retryAfterMs, fields }: { retryable?: boolean; retryAfterMs?: number; fields?: Record<string, unknown> } = {},
+) {
+  const error: Record<string, unknown> = { code, message, retryable,
+    ...(retryable ? { retryAfterMs: retryAfterMs ?? 5000 } : {}) }
+  // Extra fields never replace the core ones.
+  for (const [k, v] of Object.entries(fields ?? {})) {
+    if (!(k in error) && v !== undefined) error[k] = v
+  }
+  return {
+    isError: true,
+    content: [{ type: 'text' as const, text: JSON.stringify({ error }, null, 2) }],
+  }
+}
+
 export function withErrorHandling<T extends (...args: any[]) => Promise<any>>(handler: T): T {
   return (async (...args: any[]) => {
     try {
       return await handler(...args)
     } catch (err) {
       if (err instanceof ApiError) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({
-            error: { code: err.code, message: err.message, retryable: err.retryable,
-              ...(err.retryable ? { retryAfterMs: err.retryAfterMs ?? 5000 } : {}) }
-          }, null, 2) }],
-        }
+        return errorResult(err.code, err.message, { retryable: err.retryable, retryAfterMs: err.retryAfterMs, fields: err.fields })
       }
       // Non-ApiError (unexpected internal fault). Cap the raw message so a
       // large/exotic error string can't flood the agent's context.
