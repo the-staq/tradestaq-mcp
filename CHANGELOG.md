@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.0] - 2026-10-09
+
+### Added
+- **Multi-pair (basket) Strategy Lab runs.** `start_optimization_run` takes `symbols` (1-8 pairs, primary first, same exchange account and market type), so every candidate is tested on every pair instead of being tuned to one chart. Pairs are deduped case-insensitively with `symbol` (when given) placed first; more than one pair sends `symbols` only, one pair sends a plain scalar `symbol`. The tool text covers the per-plan cap (Free 1 / Pro 3 / Trader 4 / Whale 5, system cap 5), the pricing (base per experiment plus an extra charge per extra pair per experiment, billed per pair actually evaluated), and the pass bar (beat the original on most pairs, wreck no pair, lose money out of sample on no pair; otherwise held).
+- **Quote consent.** New `quoteId` and `acknowledgedCost` params are forwarded only when given. A multi-pair request always returns a `cost_estimate` first; the agent shows the pairs, the maximum cost and the time estimate, then re-sends the same arguments with `acknowledgeCost: true` and the `quoteId`. The bill is never above the quote.
+- **Quote fields on `cost_estimate`:** `quoteId`, `resolved`, `assets`, `assetCount`, `experimentsQuoted`, `clampedFrom`, `estimatedMinutes`, `expectedExperimentsWithinBudget` and `costBreakdown`, each only when the server sends it. Every 0.3.9 field is kept; other server keys are not passed through.
+- **`quote_changed` handling.** A 409 `quote_changed` now comes back as a normal `cost_estimate` result with `quoteChanged: true`, the new `quoteId` and `reason` (only `params_changed`, `price_increased`, `quote_expired` or `foreign_quote`), to show the user and confirm again.
+- **Basket error details.** A 400 with a server `code` (e.g. `too_many_assets`, `baskets_unavailable`, `invalid_symbols`, `basket_too_slow`) returns that code plus only the allowlisted `maxAssets`, `upgrade {tierName, maxAssets}`, `invalidSymbols`, `maxDaysAtTimeframe`, `maxAssetsThatFit` and `maxDaysThatFit`. `ApiError` gained an optional `details` (the parsed JSON error body; never set on the sanitised `insufficient_scope` path, and never added to the generic error text).
+- **Per-pair status.** `get_optimization_status` requests `detail=summary` (`experiments[].perAsset` kept only on the best and latest experiment) and its text explains `progress.basket`, `baselinePerAsset` / `bestPerAsset` (W/T/L/cured), `validation.perAsset` / `validation.breadth`, `autoPromote.untestedPairs` and the `queue {position, etaMinutes}` of a waiting run. `start_optimization_run` also passes `queue` through when the server returns it.
+
+### Changed
+- The `symbol` default (`BTC/USDT`) moved from the zod schema into the handler. Omitting `symbols` sends exactly the 0.3.9 request body.
+- `server.json` versions brought up to date (they were stale at 0.3.1).
+
+Ship this only after the TradeStaq web release with basket runs is live. Multi-pair runs stay unavailable (400 `baskets_unavailable`) until the server enables them; single-pair runs are unchanged.
+
 ## [0.3.9] - 2026-10-08
 
 ### Changed

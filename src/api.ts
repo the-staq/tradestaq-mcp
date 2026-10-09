@@ -8,6 +8,9 @@ export class ApiError extends Error {
     message: string,
     public retryable: boolean = false,
     public retryAfterMs?: number,
+    // The parsed JSON error body, for callers that read structured fields (e.g. the
+    // Strategy Lab quote_changed envelope). Never dumped into the generic error text.
+    public details?: Record<string, unknown>,
   ) {
     super(message)
     this.name = 'ApiError'
@@ -212,7 +215,10 @@ export async function api<T = unknown>(
         const message = parseOk
           ? (data?.error?.message ?? data?.error ?? data?.message ?? `API returned ${res.status}`)
           : `API returned ${res.status} with a non-JSON response`
-        throw new ApiError(res.status, code, message, retryable, retryAfterMs)
+        const details = parseOk && data && typeof data === 'object' && !Array.isArray(data)
+          ? (data as Record<string, unknown>)
+          : undefined
+        throw new ApiError(res.status, code, message, retryable, retryAfterMs, details)
       }
 
       // 2xx with an unparseable body: treat empty/no-content as an empty
