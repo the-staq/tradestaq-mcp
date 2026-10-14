@@ -4,6 +4,19 @@ import { api } from '../api.js'
 import { jsonResult, withErrorHandling } from '../helpers.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
+async function defaultExchangeId(): Promise<string> {
+  try {
+    const data = await api<any>('/api/exchanges')
+    // GET /api/exchanges returns { docs, totalDocs } (Payload docs carry `id`).
+    const exchanges = Array.isArray(data?.docs) ? data.docs : Array.isArray(data?.exchanges) ? data.exchanges : []
+    const active = exchanges.find((e: any) => e?.status === 'active' && (e.id || e._id))
+    if (active) return String(active.id || active._id)
+  } catch {
+    // Candles are still available from the public feed; don't fail the call.
+  }
+  return 'binance'
+}
+
 export function registerMarketTools(server: McpServer) {
 
   server.tool('get_price', 'Get the current price of a trading pair, along with its 24h change and volume, from a connected exchange. Use it for a quick spot-price check or to confirm the market before sizing or placing a trade. Read-only — never places orders. For historical OHLCV data use get_candles.', {
@@ -20,19 +33,29 @@ export function registerMarketTools(server: McpServer) {
     symbol: z.string().describe('Trading pair in BASE/QUOTE format, e.g. "BTC/USDT" or "ETH/USDT".'),
     timeframe: z.enum(['1m', '5m', '15m', '1h', '4h', '1d']).default('1h').describe('Candle interval. One of 1m, 5m, 15m, 1h, 4h, 1d. Defaults to 1h.'),
     limit: z.number().min(1).max(500).default(100).describe('Number of most-recent candles to return, 1-500. Defaults to 100.'),
-    exchange: z.string().optional().describe('Optional exchange account ID (from list_exchanges) to source candles from. Omit to use the default connected exchange.'),
+    exchange: z.string().optional().describe('Optional exchange account ID (from list_exchanges) to source candles from. Omit to use your first active connected exchange (public Binance data if you have none).'),
   }, { title: 'Get Candles', readOnlyHint: true, openWorldHint: true }, withErrorHandling(async ({ symbol, timeframe, limit, exchange }) => {
-    const params = new URLSearchParams({ symbol, timeframe, limit: String(limit) })
-    if (exchange) params.set('exchange', exchange)
+    // The route requires `exchangeId` (it ignores `exchange`). A bare platform
+    // name like "binance" makes it look up any user's active account of that
+    // name, so when none was given use the caller's own first active account
+    // and fall back to the public 'binance' feed only when they have none.
+    const exchangeId = exchange || await defaultExchangeId()
+    const params = new URLSearchParams({ symbol, exchangeId, timeframe, limit: String(limit ?? 100) })
     const data = await api<any>(`/api/charts/candles?${params}`)
-    const candles = data.candles || []
+    // The route returns { success, data: { candles, usingFallback, ... } }.
+    const payload = data?.data ?? data
+    const candles: any[] = Array.isArray(payload?.candles) ? payload.candles : []
+    const last = candles[candles.length - 1]
+    const fallbackExchange = typeof payload?.fallbackExchange === 'string' ? payload.fallbackExchange.slice(0, 40) : undefined
     return jsonResult({
-      symbol, timeframe, count: candles.length,
-      latest: candles[candles.length - 1],
+      symbol, timeframe, exchangeId, count: candles.length,
+      // Copied by name: only the OHLCV numbers the route documents.
+      latest: last ? { timestamp: last.timestamp, open: last.open, high: last.high, low: last.low, close: last.close, volume: last.volume } : undefined,
       range: candles.length ? {
         high: Math.max(...candles.map((c: any) => c.high)),
         low: Math.min(...candles.map((c: any) => c.low)),
       } : null,
+      ...(payload?.usingFallback === true ? { usingFallback: true, ...(fallbackExchange ? { fallbackExchange } : {}) } : {}),
     })
   }))
 

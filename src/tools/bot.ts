@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { api, ApiError } from '../api.js'
-import { jsonResult, withErrorHandling } from '../helpers.js'
+import { errorResult, jsonResult, withErrorHandling } from '../helpers.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 // The Bots collection has NO top-level isPaper/paperTrading field -- whether a
@@ -25,6 +25,124 @@ function stopAfterCloseView(v: any): { enabled: boolean, requestedAt?: string, c
     ...(typeof v?.requestedAt === 'string' ? { requestedAt: v.requestedAt } : {}),
     ...(typeof v?.completedAt === 'string' ? { completedAt: v.completedAt } : {}),
   }
+}
+
+// --- get_bot_logs views -------------------------------------------------------
+// Every field below is copied by name. Raw worker logs (spin `logs`, live-spin
+// `lg`, td.log text) are never passed through: they can hold exchange error
+// strings with account details and would flood the agent's context.
+
+const RUN_KINDS = ['skipped_bar', 'skipped_other', 'no_signal', 'signal_queued', 'signal_dropped', 'error'] as const
+const LOG_SECTIONS = ['runs', 'spinLogs', 'live'] as const
+
+function capText(v: unknown, max: number): string | undefined {
+  if (typeof v !== 'string' || !v) return undefined
+  return v.length > max ? `${v.slice(0, max)}…` : v
+}
+
+function num(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+// Drops undefined values so the JSON only carries what the server sent.
+function compact<T extends Record<string, unknown>>(o: T): Partial<T> {
+  return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>
+}
+
+function runView(r: any) {
+  return compact({
+    ts: num(r?.ts),
+    sn: num(r?.sn),
+    k: typeof r?.k === 'string' && (RUN_KINDS as readonly string[]).includes(r.k) ? r.k : undefined,
+    r: capText(r?.r, 80),
+    bar: num(r?.bar),
+    px: num(r?.px),
+    em: num(r?.em),
+    q: num(r?.q),
+    dr: num(r?.dr),
+    why: Array.isArray(r?.why) ? r.why.slice(0, 10).map((w: unknown) => capText(w, 100)).filter(Boolean) : undefined,
+    err: capText(r?.err, 300),
+    ms: num(r?.ms),
+    sk: num(r?.sk),
+    ex: capText(r?.ex, 64),
+  })
+}
+
+function signalsSummary(signals: unknown, count?: unknown) {
+  const list = Array.isArray(signals) ? signals : []
+  const types = list.map((s: any) => capText(s?.type ?? s?.action, 32)).filter(Boolean).slice(0, 10)
+  return { count: num(count) ?? list.length, ...(types.length ? { types } : {}) }
+}
+
+function errorMessageOf(e: unknown): string | undefined {
+  return capText(typeof e === 'string' ? e : (e as any)?.message, 300)
+}
+
+function spinLogView(d: any) {
+  return compact({
+    status: capText(d?.status, 32),
+    createdAt: capText(d?.createdAt, 40),
+    spinNumber: num(d?.execution?.spinNumber),
+    executionTimeMs: num(d?.execution?.executionTimeMs),
+    price: num(d?.marketContext?.price),
+    signals: signalsSummary(d?.signals),
+    error: errorMessageOf(d?.error),
+  })
+}
+
+function liveSpinView(s: any) {
+  return compact({
+    status: capText(s?.status, 32),
+    timestamp: num(s?.timestamp) ?? capText(s?.timestamp, 40),
+    spinNumber: num(s?.spinNumber),
+    executionTimeMs: num(s?.executionTimeMs),
+    signals: signalsSummary(s?.signals, s?.signalCount),
+    error: errorMessageOf(s?.error),
+    // The worker's run outcome (live-spin `oc`, served as `outcome`); absent on older entries.
+    outcome: s?.outcome && typeof s.outcome === 'object' ? runView(s.outcome) : undefined,
+  })
+}
+
+// Numbers only; anything else the server adds is ignored.
+function numericFields(o: unknown, keyMax = 64): Record<string, number> | null {
+  if (!o || typeof o !== 'object') return null
+  const out: Record<string, number> = {}
+  for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+    const n = typeof v === 'string' && /^\d+(\.\d+)?$/.test(v) ? Number(v) : num(v)
+    if (n !== undefined && /^[A-Za-z0-9_:.-]+$/.test(k) && k.length <= keyMax) out[k] = n
+  }
+  return out
+}
+
+// /runs `earlyExits`: { yyyymmdd: { reasonCode: count } } (today + yesterday, UTC).
+function earlyExitsView(o: unknown): Record<string, Record<string, number>> | null {
+  if (!o || typeof o !== 'object') return null
+  const out: Record<string, Record<string, number>> = {}
+  for (const [day, counts] of Object.entries(o as Record<string, unknown>).slice(0, 7)) {
+    if (!/^\d{8}$/.test(day)) continue
+    const n = numericFields(counts, 80)
+    if (n && Object.keys(n).length) out[day] = n
+  }
+  return out
+}
+
+// /runs `lastSpin`: { at, status, nextAt, lastProcessedCandle } (dates as ISO strings).
+function lastSpinView(v: any) {
+  if (!v || typeof v !== 'object') return null
+  return compact({
+    at: capText(v.at, 40) ?? num(v.at),
+    status: capText(v.status, 32),
+    nextAt: capText(v.nextAt, 40) ?? num(v.nextAt),
+    lastProcessedCandle: num(v.lastProcessedCandle) ?? capText(v.lastProcessedCandle, 40),
+  })
+}
+
+function sectionError(err: unknown) {
+  const e: { code: string, message?: string, retryable: boolean, retryAfterMs?: number } = err instanceof ApiError
+    ? { code: err.code, message: capText(err.message, 300), retryable: err.retryable }
+    : { code: 'INTERNAL_ERROR', message: capText((err as Error)?.message ?? 'Unknown error', 300), retryable: false }
+  if (err instanceof ApiError && err.retryable && err.retryAfterMs !== undefined) e.retryAfterMs = err.retryAfterMs
+  return e
 }
 
 export function registerBotTools(server: McpServer) {
@@ -74,22 +192,81 @@ export function registerBotTools(server: McpServer) {
     })
   }))
 
+  server.tool('get_bot_logs', 'Explain what a strategy bot has been doing run by run: why it did or did not trade, which signals it queued or dropped, and which runs failed. Use it when a bot is not trading as expected, after get_bot_status. Read-only.\n\n' +
+    'Sections (pick with `include`):\n' +
+    '- runs (default): one entry per bot run, newest first. Fields: ts (run time, ms epoch), k (outcome kind, below), r (reason code, e.g. bar_wait, entry_backoff, timeout), bar (candle open time, ms), px (price), em (signals the strategy emitted), q (orders queued), dr (signals dropped), why (short reason codes for drops/skips), err (error text, truncated), sk (skipped runs folded into this entry since the previous one), ex (executor result for the queued orders: filled | blocked | ignored | failed), sn (spin number), ms (run duration). Also pendingSkips (bar_wait skips since the last entry: n, firstAt, lastAt, lastBar), lastSpin (at, status, nextAt, lastProcessedCandle), and earlyExits (runs that stopped before saving, by UTC day yyyymmdd then reason code, today and yesterday).\n' +
+    '- spinLogs (default): stored per-run records: status (success | no_signal | error | timeout), createdAt, spinNumber, executionTimeMs, price, signals {count, types}, error message.\n' +
+    '- live: the most recent in-memory runs (status, timestamp, spinNumber, executionTimeMs, signals, error, outcome in the runs format above) plus today\'s run summary counts (todaySummary).\n\n' +
+    'Outcome kinds (k): skipped_bar = waiting for the next candle close on an on-bar-close bot, normal and not a problem; skipped_other = the run was skipped for another reason (r says why, e.g. the bar was already claimed); no_signal = the strategy ran and wanted no trade; signal_queued = it emitted signals and orders were sent to the executor (q > 0); signal_dropped = it emitted signals but none were queued (why says why, e.g. entry_backoff after rejected orders); error = the run failed (r and err say why, e.g. runtime, timeout).\n\n' +
+    'Each section reports its own error if it cannot be loaded, so one failing section does not hide the others. Never returns raw worker log text. Get bot IDs from list_bots.', {
+    botId: z.string().describe('The bot ID, obtained from list_bots.'),
+    limit: z.number().int().min(1).max(100).default(25).describe('Entries per section, 1-100. Defaults to 25. The live section returns at most 50.'),
+    include: z.array(z.enum(LOG_SECTIONS)).min(1).default(['runs', 'spinLogs']).describe('Sections to return: "runs", "spinLogs", "live". Defaults to ["runs", "spinLogs"].'),
+    kind: z.array(z.enum(RUN_KINDS)).min(1).optional().describe('Only return runs of these outcome kinds, e.g. ["error", "signal_dropped"]. Applies to the runs section only.'),
+  }, { title: 'Get Bot Logs', readOnlyHint: true }, withErrorHandling(async ({ botId, limit, include, kind }) => {
+    const id = encodeURIComponent(botId)
+    const n = String(limit ?? 25)
+    const sections = [...new Set<(typeof LOG_SECTIONS)[number]>(include?.length ? include : ['runs', 'spinLogs'])]
+
+    const fetchers: Record<(typeof LOG_SECTIONS)[number], () => Promise<unknown>> = {
+      runs: async () => {
+        const params = new URLSearchParams({ limit: n })
+        if (kind?.length) params.set('kind', kind.join(','))
+        const data = await api<any>(`/api/bots/${id}/runs?${params}`)
+        const runs = Array.isArray(data?.runs) ? data.runs : []
+        return {
+          runs: runs.map(runView),
+          pendingSkips: data?.pendingSkips ? compact({
+            n: num(data.pendingSkips.n), firstAt: num(data.pendingSkips.firstAt),
+            lastAt: num(data.pendingSkips.lastAt), lastBar: num(data.pendingSkips.lastBar),
+          }) : null,
+          lastSpin: lastSpinView(data?.lastSpin),
+          earlyExits: earlyExitsView(data?.earlyExits),
+        }
+      },
+      spinLogs: async () => {
+        const data = await api<any>(`/api/bots/${id}/spin-logs?limit=${n}`)
+        const docs = Array.isArray(data?.docs) ? data.docs : []
+        return compact({ logs: docs.map(spinLogView), total: num(data?.totalDocs), message: capText(data?.message, 200) })
+      },
+      live: async () => {
+        // summary=true: the route only returns today's summary when asked.
+        const data = await api<any>(`/api/bots/${id}/live-spins?limit=${n}&summary=true`)
+        const spins = Array.isArray(data?.spins) ? data.spins : []
+        return compact({ spins: spins.map(liveSpinView), todaySummary: numericFields(data?.summary), message: capText(data?.message, 200) })
+      },
+    }
+
+    const settled = await Promise.allSettled(sections.map((s) => fetchers[s]()))
+    const out: Record<string, unknown> = { botId }
+    settled.forEach((res, i) => {
+      out[sections[i]] = res.status === 'fulfilled' ? res.value : { error: sectionError(res.reason) }
+    })
+    // Nothing loaded: report it as a normal tool error (e.g. bot not found).
+    if (settled.every((r) => r.status === 'rejected')) {
+      const e = sectionError((settled[0] as PromiseRejectedResult).reason)
+      return errorResult(e.code, e.message ?? 'Could not load bot logs', { retryable: e.retryable, retryAfterMs: e.retryAfterMs })
+    }
+    return jsonResult(out)
+  }))
+
   server.tool(
     'deploy_bot',
-    'Deploy a strategy as a trading bot. Defaults to paper trading for safety — whether a bot trades real money is determined entirely by the exchange account it\'s attached to (not by the `live` flag alone), so this refuses to deploy if `live` doesn\'t match the target exchange\'s own paper/live status. Check an exchange\'s status with list_exchanges first, or create one with create_paper_exchange.',
+    'Deploy a strategy as a trading bot. Defaults to paper trading for safety — whether a bot trades real money is determined entirely by the exchange account it\'s attached to (not by the `live` flag alone), so this refuses to deploy if `live` doesn\'t match the target exchange\'s own paper/live status. Check an exchange\'s status with list_exchanges first, or create one with create_paper_exchange. The bot trades on the strategy\'s own timeframe unless you pass `timeframe`; omit `name` and the server names it.',
     {
       strategyId: z.string().describe('Strategy ID to deploy'),
       exchangeId: z.string().describe('Exchange account ID. Its own isPaper status (see list_exchanges) determines whether this bot trades real money — must match the `live` flag below.'),
       symbol: z.string().default('BTC/USDT'),
       market: z.enum(['spot', 'futures']).optional().describe('Market type. Omit to use the account default (spot).'),
-      name: z.string().optional(),
+      name: z.string().optional().describe('Bot name. Omit to let the server name it.'),
+      timeframe: z.string().optional().describe('Candle timeframe the bot trades on (e.g. 15m, 1h, 4h, 1d). Omit to use the strategy\'s own timeframe; only set it to override that. Your plan may limit which timeframes are allowed.'),
       live: z.boolean().default(false).describe('Must match the target exchange\'s own paper/live status: false requires a paper exchange, true requires a live one. Defaults to false (paper) for safety.'),
       positionSizePercent: z.number().min(0).max(100).default(10).describe('Position size as a percentage of account balance per trade. Defaults to 10%.'),
       leverage: z.number().min(1).max(125).default(1),
       stopLoss: z.number().optional().describe('Stop loss % (e.g. 5)'),
       takeProfit: z.number().optional().describe('Take profit % (e.g. 10)'),
     },
-    withErrorHandling(async ({ strategyId, exchangeId, symbol, market, name, live, positionSizePercent, leverage, stopLoss, takeProfit }) => {
+    withErrorHandling(async ({ strategyId, exchangeId, symbol, market, name, timeframe, live, positionSizePercent, leverage, stopLoss, takeProfit }) => {
       // The server enforces paper/live via OAuth scope tied to the target
       // exchange's real isPaper flag, but that surfaces as an opaque 403.
       // Check up front so a mismatch fails with an actionable message instead.
@@ -120,7 +297,10 @@ export function registerBotTools(server: McpServer) {
           strategy: strategyId,
           exchange: [exchangeId],
           symbol,
-          name,
+          // Only sent when given: with no name the server names the bot, and
+          // with no timeframe it uses the strategy's own timeframe.
+          ...(name ? { name } : {}),
+          ...(timeframe ? { timeframe } : {}),
           ...(market ? { market } : {}),
           positionSizing: {
             type: 'percentage',
@@ -237,9 +417,9 @@ export function registerBotTools(server: McpServer) {
     const raw = await api<any>(`/api/bots/${id}`)
     const bot = raw.doc || raw
     // openTradesCount is computed unconditionally by GET /api/bots/[id]
-    // (unlike its `openPosition` field, which is only populated when
-    // status === 'error') -- the reliable signal for "does this bot own
-    // an open trade right now" regardless of its current status.
+    // -- the reliable signal for "does this bot own an open trade right
+    // now", counting every open lot rather than the one summarised leg
+    // in `openPosition`.
     if (bot.openTradesCount) {
       throw new ApiError(409, 'OPEN_POSITION_EXISTS', `Bot ${id} (${bot.name}) still has ${bot.openTradesCount} open trade(s) recorded -- deleting it now would orphan them with no bot left to manage or close them. Close the position first (close_position), then delete.`, false)
     }
