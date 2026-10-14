@@ -413,9 +413,9 @@ export function registerBotTools(server: McpServer) {
     const raw = await api<any>(`/api/bots/${id}`)
     const bot = raw.doc || raw
     // openTradesCount is computed unconditionally by GET /api/bots/[id]
-    // (unlike its `openPosition` field, which is only populated when
-    // status === 'error') -- the reliable signal for "does this bot own
-    // an open trade right now" regardless of its current status.
+    // -- the reliable signal for "does this bot own an open trade right
+    // now", counting every open lot rather than the one summarised leg
+    // in `openPosition`.
     if (bot.openTradesCount) {
       throw new ApiError(409, 'OPEN_POSITION_EXISTS', `Bot ${id} (${bot.name}) still has ${bot.openTradesCount} open trade(s) recorded -- deleting it now would orphan them with no bot left to manage or close them. Close the position first (close_position), then delete.`, false)
     }
