@@ -5,7 +5,7 @@
 
 **[Website](https://tradestaq.com)** · **[Docs](https://tradestaq.com/docs)** · **[MCP / AI Tools](https://tradestaq.com/mcp)** · **[Pricing](https://tradestaq.com/pricing)**
 
-**31 AI-powered trading tools for Claude, Cursor, and any MCP client.**
+**46 AI-powered trading tools for Claude, Cursor, and any MCP client.**
 
 Create strategies, backtest them, deploy trading bots, copy top traders, monitor positions, and manage your crypto portfolio, all from conversation. Supports Binance, Bybit, OKX, Bitget, Hyperliquid, dYdX, and more.
 
@@ -142,6 +142,7 @@ Credentials never enter the chat when using the browser flow. Token is stored lo
 |------|-------------|
 | `list_bots` | All bots with status and performance |
 | `get_bot_status` | Detailed bot metrics and config |
+| `get_bot_logs` | Run-by-run history: why a bot did or did not trade, dropped signals, errors |
 | `deploy_bot` | Deploy a strategy as a trading bot |
 | `update_bot` | Change risk settings, notifications, or `stopAfterClose` (pause once the current position closes) |
 | `stop_bot` | Stop a running bot now (open positions are left unmanaged) |
@@ -195,7 +196,7 @@ MCP resources provide browsable data that AI clients can read directly:
 ┌──────────────┐◄──────────►┐                  ┌────────────────►┌──────────────┐
 │Claude Desktop│             │                  │                 │              │
 │Cursor / CLI  │             │  tradestaq-mcp   │   Bearer JWT    │  TradeStaq   │
-└──────────────┘             │  31 tools        │◄────────────────│  API         │
+└──────────────┘             │  46 tools        │◄────────────────│  API         │
                              │  3 prompts       │                 │              │
 ┌──────────────┐  HTTP+SSE  │  3 resources      │                 └──────────────┘
 │ Any MCP      │◄──────────►│                  │

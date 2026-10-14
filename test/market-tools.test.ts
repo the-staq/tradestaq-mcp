@@ -98,3 +98,76 @@ describe('create_paper_exchange', () => {
     expect(slug1).not.toBe(slug2)
   })
 })
+
+describe('get_candles', () => {
+  // Production response shape of GET /api/charts/candles (src/app/api/charts/candles/route.ts).
+  const CANDLES_RESPONSE = {
+    success: true,
+    data: {
+      symbol: 'BTC/USDT', timeframe: '1h',
+      candles: [
+        { timestamp: 1000, time: 1, open: 10, high: 12, low: 9, close: 11, volume: 5 },
+        { timestamp: 2000, time: 2, open: 11, high: 15, low: 8, close: 14, volume: 7 },
+      ],
+      usingFallback: false,
+    },
+  }
+
+  it('sends exchangeId (the route ignores `exchange`) and parses the { success, data: { candles } } shape', async () => {
+    mockApi.mockResolvedValue(CANDLES_RESPONSE)
+
+    const result = await getToolHandler('get_candles')({ symbol: 'BTC/USDT', timeframe: '1h', limit: 2, exchange: 'ex-1' })
+
+    expect(mockApi).toHaveBeenCalledTimes(1)
+    const url = mockApi.mock.calls[0][0] as string
+    expect(url).toContain('exchangeId=ex-1')
+    expect(url).not.toMatch(/[?&]exchange=/)
+    const parsed = JSON.parse(await textOf(result))
+    expect(parsed).toEqual({
+      symbol: 'BTC/USDT', timeframe: '1h', exchangeId: 'ex-1', count: 2,
+      latest: CANDLES_RESPONSE.data.candles[1],
+      range: { high: 15, low: 8 },
+    })
+  })
+
+  it('uses the first active exchange from /api/exchanges when none is given', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [{ id: 'ex-off', status: 'inactive' }, { id: 'ex-on', status: 'active' }] })
+      .mockResolvedValueOnce(CANDLES_RESPONSE)
+
+    await getToolHandler('get_candles')({ symbol: 'BTC/USDT', timeframe: '1h', limit: 2 })
+
+    expect(mockApi.mock.calls[0][0]).toBe('/api/exchanges')
+    expect(mockApi.mock.calls[1][0]).toContain('exchangeId=ex-on')
+  })
+
+  it('falls back to binance only when the user has no active exchange', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [] })
+      .mockResolvedValueOnce(CANDLES_RESPONSE)
+
+    await getToolHandler('get_candles')({ symbol: 'BTC/USDT', timeframe: '1h', limit: 2 })
+
+    expect(mockApi.mock.calls[1][0]).toContain('exchangeId=binance')
+  })
+
+  it('surfaces usingFallback / fallbackExchange when the server used the public feed', async () => {
+    mockApi.mockResolvedValue({ success: true, data: { ...CANDLES_RESPONSE.data, usingFallback: true, fallbackExchange: 'Binance (public)' } })
+
+    const result = await getToolHandler('get_candles')({ symbol: 'BTC/USDT', timeframe: '1h', limit: 2, exchange: 'ex-1' })
+
+    const parsed = JSON.parse(await textOf(result))
+    expect(parsed.usingFallback).toBe(true)
+    expect(parsed.fallbackExchange).toBe('Binance (public)')
+  })
+
+  it('returns count 0 and a null range for an empty window', async () => {
+    mockApi.mockResolvedValue({ success: true, data: { candles: [] } })
+
+    const result = await getToolHandler('get_candles')({ symbol: 'BTC/USDT', timeframe: '1h', limit: 2, exchange: 'ex-1' })
+
+    const parsed = JSON.parse(await textOf(result))
+    expect(parsed.count).toBe(0)
+    expect(parsed.range).toBeNull()
+  })
+})

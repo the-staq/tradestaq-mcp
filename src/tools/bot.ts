@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { api, ApiError } from '../api.js'
-import { jsonResult, withErrorHandling } from '../helpers.js'
+import { errorResult, jsonResult, withErrorHandling } from '../helpers.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 // The Bots collection has NO top-level isPaper/paperTrading field -- whether a
@@ -25,6 +25,104 @@ function stopAfterCloseView(v: any): { enabled: boolean, requestedAt?: string, c
     ...(typeof v?.requestedAt === 'string' ? { requestedAt: v.requestedAt } : {}),
     ...(typeof v?.completedAt === 'string' ? { completedAt: v.completedAt } : {}),
   }
+}
+
+// --- get_bot_logs views -------------------------------------------------------
+// Every field below is copied by name. Raw worker logs (spin `logs`, live-spin
+// `lg`, td.log text) are never passed through: they can hold exchange error
+// strings with account details and would flood the agent's context.
+
+const RUN_KINDS = ['skipped_bar', 'skipped_other', 'no_signal', 'signal_queued', 'signal_dropped', 'error'] as const
+const LOG_SECTIONS = ['runs', 'spinLogs', 'live'] as const
+
+function capText(v: unknown, max: number): string | undefined {
+  if (typeof v !== 'string' || !v) return undefined
+  return v.length > max ? `${v.slice(0, max)}…` : v
+}
+
+function num(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+// Drops undefined values so the JSON only carries what the server sent.
+function compact<T extends Record<string, unknown>>(o: T): Partial<T> {
+  return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>
+}
+
+function runView(r: any) {
+  return compact({
+    ts: num(r?.ts),
+    k: typeof r?.k === 'string' ? r.k : undefined,
+    r: capText(r?.r, 64),
+    bar: num(r?.bar),
+    px: num(r?.px),
+    em: num(r?.em),
+    q: num(r?.q),
+    dr: num(r?.dr),
+    why: Array.isArray(r?.why) ? r.why.slice(0, 10).map((w: unknown) => capText(w, 100)).filter(Boolean) : undefined,
+    err: capText(r?.err, 300),
+    sk: num(r?.sk),
+    ex: capText(r?.ex, 64),
+  })
+}
+
+function signalsSummary(signals: unknown, count?: unknown) {
+  const list = Array.isArray(signals) ? signals : []
+  const types = list.map((s: any) => capText(s?.type ?? s?.action, 32)).filter(Boolean).slice(0, 10)
+  return { count: num(count) ?? list.length, ...(types.length ? { types } : {}) }
+}
+
+function errorMessageOf(e: unknown): string | undefined {
+  return capText(typeof e === 'string' ? e : (e as any)?.message, 300)
+}
+
+function spinLogView(d: any) {
+  return compact({
+    status: capText(d?.status, 32),
+    createdAt: capText(d?.createdAt, 40),
+    spinNumber: num(d?.execution?.spinNumber),
+    executionTimeMs: num(d?.execution?.executionTimeMs),
+    price: num(d?.marketContext?.price),
+    signals: signalsSummary(d?.signals),
+    error: errorMessageOf(d?.error),
+  })
+}
+
+function liveSpinView(s: any) {
+  return compact({
+    status: capText(s?.status, 32),
+    timestamp: num(s?.timestamp) ?? capText(s?.timestamp, 40),
+    spinNumber: num(s?.spinNumber),
+    executionTimeMs: num(s?.executionTimeMs),
+    signals: signalsSummary(s?.signals, s?.signalCount),
+    error: errorMessageOf(s?.error),
+  })
+}
+
+// Numbers only; anything else the server adds is ignored.
+function numericFields(o: unknown, keyMax = 64): Record<string, number> | null {
+  if (!o || typeof o !== 'object') return null
+  const out: Record<string, number> = {}
+  for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+    const n = typeof v === 'string' && /^\d+(\.\d+)?$/.test(v) ? Number(v) : num(v)
+    if (n !== undefined && /^[A-Za-z0-9_]+$/.test(k) && k.length <= keyMax) out[k] = n
+  }
+  return out
+}
+
+function lastSpinView(v: any) {
+  if (!v || typeof v !== 'object') return null
+  return compact({
+    time: capText(v.time ?? v.lastSpinTime, 40) ?? num(v.time ?? v.lastSpinTime),
+    status: capText(v.status, 32),
+    lastProcessedCandle: num(v.lastProcessedCandle) ?? capText(v.lastProcessedCandle, 40),
+    error: errorMessageOf(v.error),
+  })
+}
+
+function sectionError(err: unknown) {
+  if (err instanceof ApiError) return { code: err.code, message: capText(err.message, 300), retryable: err.retryable }
+  return { code: 'INTERNAL_ERROR', message: capText((err as Error)?.message ?? 'Unknown error', 300), retryable: false }
 }
 
 export function registerBotTools(server: McpServer) {
@@ -72,6 +170,63 @@ export function registerBotTools(server: McpServer) {
       openPosition: data.openPosition,
       ...(data.stopAfterClose ? { stopAfterClose: stopAfterCloseView(data.stopAfterClose) } : {}),
     })
+  }))
+
+  server.tool('get_bot_logs', 'Explain what a strategy bot has been doing run by run: why it did or did not trade, which signals it queued or dropped, and which runs failed. Use it when a bot is not trading as expected, after get_bot_status. Read-only.\n\n' +
+    'Sections (pick with `include`):\n' +
+    '- runs (default): one entry per bot run, newest first. Fields: ts (run time, ms epoch), k (outcome kind, below), r (reason code, e.g. bar_wait, entry_backoff, timeout), bar (candle open time, ms), px (price), em (signals the strategy emitted), q (orders queued), dr (signals dropped), why (short reason codes for drops/skips), err (error text, truncated), sk (skipped runs folded into this entry since the previous one), ex (exchange). Also pendingSkips (bar_wait skips since the last entry: n, firstAt, lastAt, lastBar), lastSpin, and earlyExits (today\'s count of runs that stopped before saving, by reason code).\n' +
+    '- spinLogs (default): stored per-run records: status (success | no_signal | error | timeout), createdAt, spinNumber, executionTimeMs, price, signals {count, types}, error message.\n' +
+    '- live: the most recent in-memory runs (status, timestamp, spinNumber, executionTimeMs, signals, error) plus today\'s run summary counts.\n\n' +
+    'Outcome kinds (k): skipped_bar = waiting for the next candle close on an on-bar-close bot, normal and not a problem; skipped_other = the run was skipped for another reason (r says why, e.g. the bar was already claimed); no_signal = the strategy ran and wanted no trade; signal_queued = it emitted signals and orders were sent to the executor (q > 0); signal_dropped = it emitted signals but none were queued (why says why, e.g. entry_backoff after rejected orders); error = the run failed (r and err say why, e.g. runtime, timeout).\n\n' +
+    'Each section reports its own error if it cannot be loaded, so one failing section does not hide the others. Never returns raw worker log text. Get bot IDs from list_bots.', {
+    botId: z.string().describe('The bot ID, obtained from list_bots.'),
+    limit: z.number().int().min(1).max(100).default(25).describe('Entries per section, 1-100. Defaults to 25. The live section returns at most 50.'),
+    include: z.array(z.enum(LOG_SECTIONS)).min(1).default(['runs', 'spinLogs']).describe('Sections to return: "runs", "spinLogs", "live". Defaults to ["runs", "spinLogs"].'),
+    kind: z.array(z.enum(RUN_KINDS)).min(1).optional().describe('Only return runs of these outcome kinds, e.g. ["error", "signal_dropped"]. Applies to the runs section only.'),
+  }, { title: 'Get Bot Logs', readOnlyHint: true }, withErrorHandling(async ({ botId, limit, include, kind }) => {
+    const id = encodeURIComponent(botId)
+    const n = String(limit ?? 25)
+    const sections = [...new Set<(typeof LOG_SECTIONS)[number]>(include?.length ? include : ['runs', 'spinLogs'])]
+
+    const fetchers: Record<(typeof LOG_SECTIONS)[number], () => Promise<unknown>> = {
+      runs: async () => {
+        const params = new URLSearchParams({ limit: n })
+        if (kind?.length) params.set('kind', kind.join(','))
+        const data = await api<any>(`/api/bots/${id}/runs?${params}`)
+        const runs = Array.isArray(data?.runs) ? data.runs : []
+        return {
+          runs: runs.map(runView),
+          pendingSkips: data?.pendingSkips ? compact({
+            n: num(data.pendingSkips.n), firstAt: num(data.pendingSkips.firstAt),
+            lastAt: num(data.pendingSkips.lastAt), lastBar: num(data.pendingSkips.lastBar),
+          }) : null,
+          lastSpin: lastSpinView(data?.lastSpin),
+          earlyExits: numericFields(data?.earlyExits),
+        }
+      },
+      spinLogs: async () => {
+        const data = await api<any>(`/api/bots/${id}/spin-logs?limit=${n}`)
+        const docs = Array.isArray(data?.docs) ? data.docs : []
+        return compact({ logs: docs.map(spinLogView), total: num(data?.totalDocs), message: capText(data?.message, 200) })
+      },
+      live: async () => {
+        const data = await api<any>(`/api/bots/${id}/live-spins?limit=${n}`)
+        const spins = Array.isArray(data?.spins) ? data.spins : []
+        return compact({ spins: spins.map(liveSpinView), todaySummary: numericFields(data?.summary), message: capText(data?.message, 200) })
+      },
+    }
+
+    const settled = await Promise.allSettled(sections.map((s) => fetchers[s]()))
+    const out: Record<string, unknown> = { botId }
+    settled.forEach((res, i) => {
+      out[sections[i]] = res.status === 'fulfilled' ? res.value : { error: sectionError(res.reason) }
+    })
+    // Nothing loaded: report it as a normal tool error (e.g. bot not found).
+    if (settled.every((r) => r.status === 'rejected')) {
+      const e = sectionError((settled[0] as PromiseRejectedResult).reason)
+      return errorResult(e.code, e.message ?? 'Could not load bot logs', { retryable: e.retryable })
+    }
+    return jsonResult(out)
   }))
 
   server.tool(
