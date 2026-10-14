@@ -125,7 +125,7 @@ describe('get_candles', () => {
     const parsed = JSON.parse(await textOf(result))
     expect(parsed).toEqual({
       symbol: 'BTC/USDT', timeframe: '1h', exchangeId: 'ex-1', count: 2,
-      latest: CANDLES_RESPONSE.data.candles[1],
+      latest: { timestamp: 2000, open: 11, high: 15, low: 8, close: 14, volume: 7 },
       range: { high: 15, low: 8 },
     })
   })
@@ -159,6 +159,27 @@ describe('get_candles', () => {
     const parsed = JSON.parse(await textOf(result))
     expect(parsed.usingFallback).toBe(true)
     expect(parsed.fallbackExchange).toBe('Binance (public)')
+  })
+
+  it('falls back to binance when /api/exchanges fails, and still returns candles', async () => {
+    mockApi
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockResolvedValueOnce(CANDLES_RESPONSE)
+
+    const result = await getToolHandler('get_candles')({ symbol: 'BTC/USDT', timeframe: '1h', limit: 2 })
+
+    expect(mockApi.mock.calls[1][0]).toContain('exchangeId=binance')
+    expect(JSON.parse(await textOf(result)).count).toBe(2)
+  })
+
+  it('caps fallbackExchange and ignores a non-boolean usingFallback', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, data: { ...CANDLES_RESPONSE.data, usingFallback: true, fallbackExchange: 'B'.repeat(500) } })
+    const capped = JSON.parse(await textOf(await getToolHandler('get_candles')({ symbol: 'BTC/USDT', timeframe: '1h', limit: 2, exchange: 'ex-1' })))
+    expect(capped.fallbackExchange).toHaveLength(40)
+
+    mockApi.mockResolvedValueOnce({ success: true, data: { ...CANDLES_RESPONSE.data, usingFallback: 'yes' } })
+    const ignored = JSON.parse(await textOf(await getToolHandler('get_candles')({ symbol: 'BTC/USDT', timeframe: '1h', limit: 2, exchange: 'ex-1' })))
+    expect(ignored).not.toHaveProperty('usingFallback')
   })
 
   it('returns count 0 and a null range for an empty window', async () => {

@@ -7,8 +7,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 async function defaultExchangeId(): Promise<string> {
   try {
     const data = await api<any>('/api/exchanges')
-    const exchanges = data.exchanges || data.docs || []
-    const active = exchanges.find((e: any) => e.status === 'active' && (e.id || e._id))
+    // GET /api/exchanges returns { docs, totalDocs } (Payload docs carry `id`).
+    const exchanges = Array.isArray(data?.docs) ? data.docs : Array.isArray(data?.exchanges) ? data.exchanges : []
+    const active = exchanges.find((e: any) => e?.status === 'active' && (e.id || e._id))
     if (active) return String(active.id || active._id)
   } catch {
     // Candles are still available from the public feed; don't fail the call.
@@ -43,15 +44,18 @@ export function registerMarketTools(server: McpServer) {
     const data = await api<any>(`/api/charts/candles?${params}`)
     // The route returns { success, data: { candles, usingFallback, ... } }.
     const payload = data?.data ?? data
-    const candles = payload?.candles || []
+    const candles: any[] = Array.isArray(payload?.candles) ? payload.candles : []
+    const last = candles[candles.length - 1]
+    const fallbackExchange = typeof payload?.fallbackExchange === 'string' ? payload.fallbackExchange.slice(0, 40) : undefined
     return jsonResult({
       symbol, timeframe, exchangeId, count: candles.length,
-      latest: candles[candles.length - 1],
+      // Copied by name: only the OHLCV numbers the route documents.
+      latest: last ? { timestamp: last.timestamp, open: last.open, high: last.high, low: last.low, close: last.close, volume: last.volume } : undefined,
       range: candles.length ? {
         high: Math.max(...candles.map((c: any) => c.high)),
         low: Math.min(...candles.map((c: any) => c.low)),
       } : null,
-      ...(payload?.usingFallback ? { usingFallback: true, fallbackExchange: payload.fallbackExchange } : {}),
+      ...(payload?.usingFallback === true ? { usingFallback: true, ...(fallbackExchange ? { fallbackExchange } : {}) } : {}),
     })
   }))
 

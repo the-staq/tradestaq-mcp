@@ -52,8 +52,9 @@ function compact<T extends Record<string, unknown>>(o: T): Partial<T> {
 function runView(r: any) {
   return compact({
     ts: num(r?.ts),
-    k: typeof r?.k === 'string' ? r.k : undefined,
-    r: capText(r?.r, 64),
+    sn: num(r?.sn),
+    k: typeof r?.k === 'string' && (RUN_KINDS as readonly string[]).includes(r.k) ? r.k : undefined,
+    r: capText(r?.r, 80),
     bar: num(r?.bar),
     px: num(r?.px),
     em: num(r?.em),
@@ -61,6 +62,7 @@ function runView(r: any) {
     dr: num(r?.dr),
     why: Array.isArray(r?.why) ? r.why.slice(0, 10).map((w: unknown) => capText(w, 100)).filter(Boolean) : undefined,
     err: capText(r?.err, 300),
+    ms: num(r?.ms),
     sk: num(r?.sk),
     ex: capText(r?.ex, 64),
   })
@@ -96,6 +98,8 @@ function liveSpinView(s: any) {
     executionTimeMs: num(s?.executionTimeMs),
     signals: signalsSummary(s?.signals, s?.signalCount),
     error: errorMessageOf(s?.error),
+    // The worker's run outcome (live-spin `oc`, served as `outcome`); absent on older entries.
+    outcome: s?.outcome && typeof s.outcome === 'object' ? runView(s.outcome) : undefined,
   })
 }
 
@@ -105,24 +109,40 @@ function numericFields(o: unknown, keyMax = 64): Record<string, number> | null {
   const out: Record<string, number> = {}
   for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
     const n = typeof v === 'string' && /^\d+(\.\d+)?$/.test(v) ? Number(v) : num(v)
-    if (n !== undefined && /^[A-Za-z0-9_]+$/.test(k) && k.length <= keyMax) out[k] = n
+    if (n !== undefined && /^[A-Za-z0-9_:.-]+$/.test(k) && k.length <= keyMax) out[k] = n
   }
   return out
 }
 
+// /runs `earlyExits`: { yyyymmdd: { reasonCode: count } } (today + yesterday, UTC).
+function earlyExitsView(o: unknown): Record<string, Record<string, number>> | null {
+  if (!o || typeof o !== 'object') return null
+  const out: Record<string, Record<string, number>> = {}
+  for (const [day, counts] of Object.entries(o as Record<string, unknown>).slice(0, 7)) {
+    if (!/^\d{8}$/.test(day)) continue
+    const n = numericFields(counts, 80)
+    if (n && Object.keys(n).length) out[day] = n
+  }
+  return out
+}
+
+// /runs `lastSpin`: { at, status, nextAt, lastProcessedCandle } (dates as ISO strings).
 function lastSpinView(v: any) {
   if (!v || typeof v !== 'object') return null
   return compact({
-    time: capText(v.time ?? v.lastSpinTime, 40) ?? num(v.time ?? v.lastSpinTime),
+    at: capText(v.at, 40) ?? num(v.at),
     status: capText(v.status, 32),
+    nextAt: capText(v.nextAt, 40) ?? num(v.nextAt),
     lastProcessedCandle: num(v.lastProcessedCandle) ?? capText(v.lastProcessedCandle, 40),
-    error: errorMessageOf(v.error),
   })
 }
 
 function sectionError(err: unknown) {
-  if (err instanceof ApiError) return { code: err.code, message: capText(err.message, 300), retryable: err.retryable }
-  return { code: 'INTERNAL_ERROR', message: capText((err as Error)?.message ?? 'Unknown error', 300), retryable: false }
+  const e: { code: string, message?: string, retryable: boolean, retryAfterMs?: number } = err instanceof ApiError
+    ? { code: err.code, message: capText(err.message, 300), retryable: err.retryable }
+    : { code: 'INTERNAL_ERROR', message: capText((err as Error)?.message ?? 'Unknown error', 300), retryable: false }
+  if (err instanceof ApiError && err.retryable && err.retryAfterMs !== undefined) e.retryAfterMs = err.retryAfterMs
+  return e
 }
 
 export function registerBotTools(server: McpServer) {
@@ -174,9 +194,9 @@ export function registerBotTools(server: McpServer) {
 
   server.tool('get_bot_logs', 'Explain what a strategy bot has been doing run by run: why it did or did not trade, which signals it queued or dropped, and which runs failed. Use it when a bot is not trading as expected, after get_bot_status. Read-only.\n\n' +
     'Sections (pick with `include`):\n' +
-    '- runs (default): one entry per bot run, newest first. Fields: ts (run time, ms epoch), k (outcome kind, below), r (reason code, e.g. bar_wait, entry_backoff, timeout), bar (candle open time, ms), px (price), em (signals the strategy emitted), q (orders queued), dr (signals dropped), why (short reason codes for drops/skips), err (error text, truncated), sk (skipped runs folded into this entry since the previous one), ex (exchange). Also pendingSkips (bar_wait skips since the last entry: n, firstAt, lastAt, lastBar), lastSpin, and earlyExits (today\'s count of runs that stopped before saving, by reason code).\n' +
+    '- runs (default): one entry per bot run, newest first. Fields: ts (run time, ms epoch), k (outcome kind, below), r (reason code, e.g. bar_wait, entry_backoff, timeout), bar (candle open time, ms), px (price), em (signals the strategy emitted), q (orders queued), dr (signals dropped), why (short reason codes for drops/skips), err (error text, truncated), sk (skipped runs folded into this entry since the previous one), ex (executor result for the queued orders: filled | blocked | ignored | failed), sn (spin number), ms (run duration). Also pendingSkips (bar_wait skips since the last entry: n, firstAt, lastAt, lastBar), lastSpin (at, status, nextAt, lastProcessedCandle), and earlyExits (runs that stopped before saving, by UTC day yyyymmdd then reason code, today and yesterday).\n' +
     '- spinLogs (default): stored per-run records: status (success | no_signal | error | timeout), createdAt, spinNumber, executionTimeMs, price, signals {count, types}, error message.\n' +
-    '- live: the most recent in-memory runs (status, timestamp, spinNumber, executionTimeMs, signals, error) plus today\'s run summary counts.\n\n' +
+    '- live: the most recent in-memory runs (status, timestamp, spinNumber, executionTimeMs, signals, error, outcome in the runs format above) plus today\'s run summary counts (todaySummary).\n\n' +
     'Outcome kinds (k): skipped_bar = waiting for the next candle close on an on-bar-close bot, normal and not a problem; skipped_other = the run was skipped for another reason (r says why, e.g. the bar was already claimed); no_signal = the strategy ran and wanted no trade; signal_queued = it emitted signals and orders were sent to the executor (q > 0); signal_dropped = it emitted signals but none were queued (why says why, e.g. entry_backoff after rejected orders); error = the run failed (r and err say why, e.g. runtime, timeout).\n\n' +
     'Each section reports its own error if it cannot be loaded, so one failing section does not hide the others. Never returns raw worker log text. Get bot IDs from list_bots.', {
     botId: z.string().describe('The bot ID, obtained from list_bots.'),
@@ -201,7 +221,7 @@ export function registerBotTools(server: McpServer) {
             lastAt: num(data.pendingSkips.lastAt), lastBar: num(data.pendingSkips.lastBar),
           }) : null,
           lastSpin: lastSpinView(data?.lastSpin),
-          earlyExits: numericFields(data?.earlyExits),
+          earlyExits: earlyExitsView(data?.earlyExits),
         }
       },
       spinLogs: async () => {
@@ -210,7 +230,8 @@ export function registerBotTools(server: McpServer) {
         return compact({ logs: docs.map(spinLogView), total: num(data?.totalDocs), message: capText(data?.message, 200) })
       },
       live: async () => {
-        const data = await api<any>(`/api/bots/${id}/live-spins?limit=${n}`)
+        // summary=true: the route only returns today's summary when asked.
+        const data = await api<any>(`/api/bots/${id}/live-spins?limit=${n}&summary=true`)
         const spins = Array.isArray(data?.spins) ? data.spins : []
         return compact({ spins: spins.map(liveSpinView), todaySummary: numericFields(data?.summary), message: capText(data?.message, 200) })
       },
@@ -224,7 +245,7 @@ export function registerBotTools(server: McpServer) {
     // Nothing loaded: report it as a normal tool error (e.g. bot not found).
     if (settled.every((r) => r.status === 'rejected')) {
       const e = sectionError((settled[0] as PromiseRejectedResult).reason)
-      return errorResult(e.code, e.message ?? 'Could not load bot logs', { retryable: e.retryable })
+      return errorResult(e.code, e.message ?? 'Could not load bot logs', { retryable: e.retryable, retryAfterMs: e.retryAfterMs })
     }
     return jsonResult(out)
   }))
