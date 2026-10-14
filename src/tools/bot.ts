@@ -252,20 +252,21 @@ export function registerBotTools(server: McpServer) {
 
   server.tool(
     'deploy_bot',
-    'Deploy a strategy as a trading bot. Defaults to paper trading for safety — whether a bot trades real money is determined entirely by the exchange account it\'s attached to (not by the `live` flag alone), so this refuses to deploy if `live` doesn\'t match the target exchange\'s own paper/live status. Check an exchange\'s status with list_exchanges first, or create one with create_paper_exchange.',
+    'Deploy a strategy as a trading bot. Defaults to paper trading for safety — whether a bot trades real money is determined entirely by the exchange account it\'s attached to (not by the `live` flag alone), so this refuses to deploy if `live` doesn\'t match the target exchange\'s own paper/live status. Check an exchange\'s status with list_exchanges first, or create one with create_paper_exchange. The bot trades on the strategy\'s own timeframe unless you pass `timeframe`; omit `name` and the server names it.',
     {
       strategyId: z.string().describe('Strategy ID to deploy'),
       exchangeId: z.string().describe('Exchange account ID. Its own isPaper status (see list_exchanges) determines whether this bot trades real money — must match the `live` flag below.'),
       symbol: z.string().default('BTC/USDT'),
       market: z.enum(['spot', 'futures']).optional().describe('Market type. Omit to use the account default (spot).'),
-      name: z.string().optional(),
+      name: z.string().optional().describe('Bot name. Omit to let the server name it.'),
+      timeframe: z.string().optional().describe('Candle timeframe the bot trades on (e.g. 15m, 1h, 4h, 1d). Omit to use the strategy\'s own timeframe; only set it to override that. Your plan may limit which timeframes are allowed.'),
       live: z.boolean().default(false).describe('Must match the target exchange\'s own paper/live status: false requires a paper exchange, true requires a live one. Defaults to false (paper) for safety.'),
       positionSizePercent: z.number().min(0).max(100).default(10).describe('Position size as a percentage of account balance per trade. Defaults to 10%.'),
       leverage: z.number().min(1).max(125).default(1),
       stopLoss: z.number().optional().describe('Stop loss % (e.g. 5)'),
       takeProfit: z.number().optional().describe('Take profit % (e.g. 10)'),
     },
-    withErrorHandling(async ({ strategyId, exchangeId, symbol, market, name, live, positionSizePercent, leverage, stopLoss, takeProfit }) => {
+    withErrorHandling(async ({ strategyId, exchangeId, symbol, market, name, timeframe, live, positionSizePercent, leverage, stopLoss, takeProfit }) => {
       // The server enforces paper/live via OAuth scope tied to the target
       // exchange's real isPaper flag, but that surfaces as an opaque 403.
       // Check up front so a mismatch fails with an actionable message instead.
@@ -296,7 +297,10 @@ export function registerBotTools(server: McpServer) {
           strategy: strategyId,
           exchange: [exchangeId],
           symbol,
-          name,
+          // Only sent when given: with no name the server names the bot, and
+          // with no timeframe it uses the strategy's own timeframe.
+          ...(name ? { name } : {}),
+          ...(timeframe ? { timeframe } : {}),
           ...(market ? { market } : {}),
           positionSizing: {
             type: 'percentage',

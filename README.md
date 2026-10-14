@@ -148,7 +148,7 @@ Credentials never enter the chat when using the browser flow. Token is stored lo
 | `stop_bot` | Stop a running bot now (open positions are left unmanaged) |
 | `close_position` | Close an open position (full or partial) |
 
-`deploy_bot` defaults to paper trading. Pass `live: true` for real money.
+`deploy_bot` defaults to paper trading. Pass `live: true` for real money. The bot trades on the strategy's own timeframe; pass `timeframe` (e.g. `4h`) only to override it. Leave out `name` and the server names the bot.
 
 ### Trade History
 

@@ -320,6 +320,30 @@ describe('deploy_bot', () => {
     expect(await textOf(result)).toContain('PAPER (simulated) mode on Bybit Futures Paper')
     expect(await textOf(result)).toContain('ID: new-bot-1')
   })
+
+  it('omits name and timeframe when not given, so the server names the bot and uses the strategy\'s own timeframe', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
+      .mockResolvedValueOnce({ doc: { id: 'new-bot-2' } })
+
+    const handler = getToolHandler('deploy_bot')
+    await handler({ strategyId: 'strat-1', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1 })
+
+    const body = mockApi.mock.calls[1][1].body
+    expect(body).not.toHaveProperty('name')
+    expect(body).not.toHaveProperty('timeframe')
+  })
+
+  it('passes timeframe through when given', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
+      .mockResolvedValueOnce({ doc: { id: 'new-bot-3' } })
+
+    const handler = getToolHandler('deploy_bot')
+    await handler({ strategyId: 'strat-1', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', timeframe: '4h', live: false, positionSizePercent: 10, leverage: 1 })
+
+    expect(mockApi.mock.calls[1][1].body.timeframe).toBe('4h')
+  })
 })
 
 describe('update_bot', () => {
