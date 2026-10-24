@@ -984,6 +984,12 @@ describe('export_bot_trades', () => {
 })
 
 describe('close_position', () => {
+  const SOL = { exchangeId: 'ex-1', exchange: 'kucoin', symbol: 'SOL/USDT', side: 'long', size: 52.81, botId: 'bot-sol', botName: 'MFRider SOL', botCount: 1 }
+  const closed = (o: Record<string, unknown> = {}) => ({
+    success: true, message: 'Position closed successfully', order: { id: 'paper_spot_sell_1', average: 191.2 },
+    filledSize: 52.81, exitPrice: 191.2, closedSize: 52.81, pnl: 31.4, botId: 'bot-sol', ...o,
+  })
+
   it('resolves a percentage into the real absolute size from get_positions, matching by exchangeId not exchange name', async () => {
     mockApi
       .mockResolvedValueOnce({
@@ -991,7 +997,7 @@ describe('close_position', () => {
           { exchangeId: 'ex-1', exchange: 'binance', symbol: 'BTC/USDT', side: 'long', size: 0.4 },
         ],
       })
-      .mockResolvedValueOnce({ pnl: 12.3 })
+      .mockResolvedValueOnce(closed({ closedSize: 0.2, filledSize: 0.2, partial: true }))
 
     const handler = getToolHandler('close_position')
     await handler({ exchangeId: 'ex-1', symbol: 'BTC/USDT', side: 'long', percentage: 50 })
@@ -1009,5 +1015,78 @@ describe('close_position', () => {
     expect(result.isError).toBe(true)
     const body = JSON.parse(result.content[0].text)
     expect(body.error.code).toBe('POSITION_NOT_FOUND')
+  })
+
+  // Value: protects=the agent is never told "Position closed." for a close that closed nothing; fails_when=the tool prints success on any 2xx (prod 2026-10-24: three paper closes sold nothing, each reported closed); why_new=P1 false close; seam=api mock; no_claim=the server's own gate
+  it('a bare success with nothing confirmed (the 2026-10-24 response) is an error, never "Position closed."', async () => {
+    mockApi
+      .mockResolvedValueOnce({ positions: [SOL] })
+      .mockResolvedValueOnce({ success: true, message: 'Position closed successfully', order: { id: 'paper_exit_1', price: 190, average: 190, status: 'closed', fee: 0 } })
+    const result = await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 100 })
+    expect(result.isError).toBe(true)
+    const text = await textOf(result)
+    expect(text).not.toMatch(/Position closed/)
+    expect(JSON.parse(text).error.code).toBe('CLOSE_NOT_CONFIRMED')
+  })
+
+  it('a 2xx carrying success: false surfaces the server\'s reason as an error', async () => {
+    mockApi
+      .mockResolvedValueOnce({ positions: [SOL] })
+      .mockResolvedValueOnce({ success: false, message: 'Spot sell held: the bot\'s own resting SOL/USDT sells lock the SOL' })
+    const result = await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 100 })
+    expect(result.isError).toBe(true)
+    const body = JSON.parse(await textOf(result))
+    expect(body.error.code).toBe('CLOSE_NOT_CONFIRMED')
+    expect(body.error.message).toContain('Spot sell held')
+  })
+
+  it.each([
+    [404, 'NOTHING_TO_CLOSE', 'No open long SOL/USDT position on this account: nothing was closed.'],
+    [409, 'CLOSED_NOT_RECORDED', 'Sold 52.81 SOL on the exchange, but the sale could not be recorded: x. It IS closed: do not close it again; its records are reconciled from the exchange.'],
+  ])('a %s %s from the server is surfaced as that error, with its message', async (status, code, message) => {
+    mockApi
+      .mockResolvedValueOnce({ positions: [SOL] })
+      .mockRejectedValueOnce(new ApiError(status, code, message, false))
+    const result = await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 100 })
+    expect(result.isError).toBe(true)
+    const body = JSON.parse(await textOf(result))
+    expect(body.error).toMatchObject({ code, message })
+  })
+
+  // Value: protects=a bot's position is closed as that bot's close (its lots, exit row, stop-after-close); fails_when=the tool never sends the owning bot (closed as the account's leg, botId undefined in the prod log); why_new=P1 false close; seam=api mock; no_claim=the server's own owner resolution
+  it('passes the position\'s own bot as botId when exactly one bot holds it, and reports what closed', async () => {
+    mockApi.mockResolvedValueOnce({ positions: [SOL] }).mockResolvedValueOnce(closed())
+    const result = await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 100 })
+    expect(mockApi).toHaveBeenNthCalledWith(2, '/api/positions/close', {
+      method: 'POST',
+      body: { exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', size: 52.81, botId: 'bot-sol' },
+    })
+    expect(result.isError).toBeUndefined()
+    const text = await textOf(result)
+    expect(text).toContain('Position closed.')
+    expect(text).toContain('Closed: 52.81 @ 191.2')
+    expect(text).toContain('PnL: 31.4')
+    expect(text).toContain('Bot: MFRider SOL (bot-sol)')
+  })
+
+  it('a position several bots share: no botId sent (each bot\'s part is booked to it) unless one is given', async () => {
+    const shared = { ...SOL, botName: '2 bots', botCount: 2, botId: 'bot-a' }
+    mockApi.mockResolvedValueOnce({ positions: [shared] }).mockResolvedValueOnce(closed({ botId: undefined }))
+    await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 100 })
+    expect(mockApi.mock.calls[1][1].body).not.toHaveProperty('botId')
+
+    mockApi.mockResolvedValueOnce({ positions: [shared] }).mockResolvedValueOnce(closed({ botId: 'bot-b', partial: true, closedSize: 10 }))
+    const result = await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 100, botId: 'bot-b' })
+    expect(mockApi.mock.calls[3][1].body.botId).toBe('bot-b')
+    expect(await textOf(result)).toContain('Position partly closed.')
+  })
+
+  it('a manual position (botCount 0): no botId sent; a live leg with no lot reports what the exchange filled', async () => {
+    mockApi
+      .mockResolvedValueOnce({ positions: [{ ...SOL, botId: undefined, botName: undefined, botCount: 0 }] })
+      .mockResolvedValueOnce({ success: true, message: 'Position closed successfully', order: { id: 'o-1', average: 191 }, filledSize: 52.81, exitPrice: 191 })
+    const result = await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 100 })
+    expect(mockApi.mock.calls[1][1].body).not.toHaveProperty('botId')
+    expect(await textOf(result)).toContain('Closed: 52.81 @ 191')
   })
 })

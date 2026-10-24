@@ -787,12 +787,13 @@ export function registerBotTools(server: McpServer) {
     return jsonResult(result)
   }))
 
-  server.tool('close_position', 'Close an open trading position by placing a market order — fully or partially. This moves real money when the position is live, so confirm intent with the user before calling. Find the exchangeId, symbol, and side with get_positions. Set percentage below 100 for a partial close.', {
+  server.tool('close_position', 'Close an open trading position by placing a market order — fully or partially. This moves real money when the position is live, so confirm intent with the user before calling. Find the exchangeId, symbol, and side with get_positions. Set percentage below 100 for a partial close. A position one bot holds is closed as that bot\'s close (its lots, its exit record). Reports what actually closed (size, price, PnL) as the server confirmed it; when nothing closed, it returns the server\'s reason as an error, never "closed".', {
     exchangeId: z.string().describe('The exchange account ID where the position is open, from get_positions or list_exchanges.'),
     symbol: z.string().describe('Trading pair of the position, e.g. "BTC/USDT".'),
     side: z.enum(['long', 'short']).describe('Position side, from get_positions.'),
     percentage: z.number().min(1).max(100).default(100).describe('Percentage of the position to close, 1-100. 100 = full close (default); e.g. 50 closes half.'),
-  }, { title: 'Close Position', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }, withErrorHandling(async ({ exchangeId, symbol, side, percentage }) => {
+    botId: z.string().optional().describe('Optional: the bot whose position this is (its id, from list_bots). Defaults to the position\'s own bot when exactly one bot holds it. With a position several bots share, only this bot\'s share closes (at most the percentage of the whole position).'),
+  }, { title: 'Close Position', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }, withErrorHandling(async ({ exchangeId, symbol, side, percentage, botId }) => {
     // The close endpoint takes an ABSOLUTE size, not a percentage -- resolve
     // the position's real size first so a 50% request actually closes half
     // the position instead of being misread as "close 50 units."
@@ -803,20 +804,37 @@ export function registerBotTools(server: McpServer) {
       (p: any) => String(p.exchangeId) === String(exchangeId) && p.symbol === symbol && p.side === side,
     )
     if (!position) {
-      throw new ApiError(404, 'POSITION_NOT_FOUND', `No open ${side} position for ${symbol} on exchange ${exchangeId}. Use get_positions to see what's actually open.`, false)
+      throw new ApiError(404, 'POSITION_NOT_FOUND', `No open ${side} ${symbol} position on exchange ${exchangeId}. Use get_positions to see what's actually open.`, false)
     }
     const size = position.size * (percentage / 100)
+    // The bot that holds it: named by the caller, else the position's own bot when exactly
+    // one bot holds it (botCount 1). The server then closes it as that bot's close.
+    const ownerBotId = botId || (Number(position.botCount) === 1 && position.botId ? String(position.botId) : undefined)
 
     const data = await api<any>('/api/positions/close', {
       method: 'POST',
-      body: { exchangeId, symbol, side, size },
+      body: { exchangeId, symbol, side, size, ...(ownerBotId ? { botId: ownerBotId } : {}) },
     })
-    const pnl = data.pnl ?? data.body?.pnl
-    return {
-      content: [{
-        type: 'text' as const,
-        text: `Position closed${percentage < 100 ? ` (${percentage}%)` : ''}.\nSymbol: ${symbol}\n${pnl != null ? `PnL: ${pnl}` : ''}\n\nUse get_positions to verify.`,
-      }],
+    // A close is reported only when the server confirms what it closed: `closedSize` (booked)
+    // or `filledSize` (what the exchange filled). A bare success closed nothing that it could
+    // show (prod 2026-10-24: "Position closed." for three paper closes that sold nothing).
+    const closedSize = Number(data?.closedSize) > 0 ? Number(data.closedSize) : Number(data?.filledSize) > 0 ? Number(data.filledSize) : 0
+    if (data?.success !== true || !(closedSize > 0)) {
+      // The server's reason when it gave one (a bare success's "closed" message is not one).
+      const why = data?.success !== true && typeof data?.message === 'string' && data.message ? `: ${data.message}` : ''
+      return errorResult('CLOSE_NOT_CONFIRMED', `The server did not confirm that anything closed for the ${side} ${symbol} position${why}. It is NOT reported as closed: check get_positions before trying again.`)
     }
+    const price = Number(data.exitPrice) > 0 ? Number(data.exitPrice) : Number(data.order?.average) > 0 ? Number(data.order.average) : undefined
+    const closedBot = data.botId || ownerBotId
+    const lines = [
+      `${data.partial ? 'Position partly closed' : 'Position closed'}${percentage < 100 ? ` (${percentage}% requested)` : ''}.`,
+      `Symbol: ${symbol} (${side})`,
+      `Closed: ${closedSize}${price != null ? ` @ ${price}` : ''}`,
+      ...(data.pnl != null ? [`PnL: ${data.pnl}`] : []),
+      ...(closedBot ? [`Bot: ${position.botName && String(position.botId) === String(closedBot) ? `${position.botName} (${closedBot})` : closedBot}`] : []),
+      '',
+      'Use get_positions to verify.',
+    ]
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] }
   }))
 }
