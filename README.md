@@ -144,11 +144,21 @@ Credentials never enter the chat when using the browser flow. Token is stored lo
 | `get_bot_status` | Detailed bot metrics and config |
 | `get_bot_logs` | Run-by-run history: why a bot did or did not trade, dropped signals, errors |
 | `deploy_bot` | Deploy a strategy as a trading bot |
-| `update_bot` | Change risk settings, notifications, or `stopAfterClose` (pause once the current position closes) |
+| `update_bot` | Edit a bot: rename, switch strategy or apply a preset, timeframe, execution mode, strategy parameters, version channel, risk settings, notifications, `stopAfterClose` |
+| `start_bot` | Start a paused or stopped bot |
 | `stop_bot` | Stop a running bot now (open positions are left unmanaged) |
+| `delete_bot` | Delete a bot (refused while it has an open trade) |
 | `close_position` | Close an open position (full or partial) |
 
 `deploy_bot` defaults to paper trading. Pass `live: true` for real money. The bot trades on the strategy's own timeframe; pass `timeframe` (e.g. `4h`) only to override it. Leave out `name` and the server names the bot.
+
+`update_bot` sends everything you pass in one update, after merging it onto the bot's current settings (position sizing, spin settings and parameter overrides are never wiped by a partial change). Size and leverage change only when you pass them. `strategyId` and `presetId` take an ID or a slug (`trade-wind`, `trade-wind-long-short`). A strategy or timeframe change needs the bot to be flat: pause it with `stopAfterClose: true` first, wait until `get_bot_status` shows no open position, then switch, then `start_bot`. A live bot needs the `mcp:live` scope for any change; a paper bot `mcp:paper`. The reply is the resulting config (strategy, version, timeframe, mode, overrides, size, leverage, status) plus server warnings.
+
+For example, switching a paused 15m GhostRider bot to Trade Wind on 4h with its Long & Short preset, and renaming it:
+
+```json
+{ "id": "6ab7c2d60014ba19b0c54258", "presetId": "trade-wind-long-short", "timeframe": "4h", "name": "Trade Wind · SUI · 4h" }
+```
 
 ### Trade History
 

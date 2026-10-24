@@ -112,6 +112,33 @@ describe('get_bot_status', () => {
   })
 })
 
+describe('get_bot_status strategyConfig', () => {
+  it('shows what update_bot can change on a strategy bot, with no version code or scheduler internals', async () => {
+    mockApi.mockResolvedValue({
+      doc: {
+        id: 'bot-ref', name: 'StormRider · ADA · 4h', status: 'active', triggerType: 'strategy', symbol: 'ADA/USDT:USDT',
+        strategy: { id: '6aa000000000000000000003', name: 'StormRider' },
+        versionChannel: 'custom', pinnedVersion: { id: '6aa0000000000000000000c1', semanticVersion: '1.04', code: 'secret' },
+        preset: '6aa0000000000000000000d1', timeframe: '4h',
+        spinConfig: { interval: 3600, executionMode: 'on_bar_close', nextSpinTime: '2026-10-24T12:00:00.000Z' },
+        parameterOverrides: { LONG_ST_MULT: 4.5, ENABLE_SHORTS: true },
+        positionSizing: { type: 'percentage', value: 8, leverage: 5 },
+      },
+    })
+
+    const out = await jsonOf(await getToolHandler('get_bot_status')({ id: 'bot-ref' }))
+
+    expect(out.config).toEqual({ leverage: 5, positionSize: 8, positionSizeType: 'percentage' })
+    expect(out.strategyConfig).toEqual({
+      versionChannel: 'custom', version: '1.04', versionId: '6aa0000000000000000000c1', preset: '6aa0000000000000000000d1',
+      timeframe: '4h', executionMode: 'on_bar_close', spinIntervalSeconds: 3600,
+      parameterOverrides: { LONG_ST_MULT: 4.5, ENABLE_SHORTS: true },
+    })
+    expect(JSON.stringify(out)).not.toContain('secret')
+    expect(JSON.stringify(out)).not.toContain('nextSpinTime')
+  })
+})
+
 describe('get_bot_status openPosition', () => {
   it('returns openPosition for an active bot (production GET /api/bots/:id shape)', async () => {
     mockApi.mockResolvedValue({
@@ -499,6 +526,303 @@ describe('update_bot', () => {
     const schema = call[2] as Record<string, any>
     expect(schema.stopAfterClose.description).toMatch(/no new entries/)
     expect(schema.stopAfterClose.description).toMatch(/immediately if already flat/)
+  })
+})
+
+describe('update_bot: rename, strategy switch, preset, timeframe, parameters', () => {
+  const GR = '6aa000000000000000000001'
+  const TW = '6aa000000000000000000002'
+  const TW_PRESET = '6ad65ed9e2c40c18ed143c43'
+
+  // GET /api/bots/:id as the server returns it for a paused GhostRider SUI bot.
+  function ghostRiderBot(extra: Record<string, unknown> = {}) {
+    return {
+      id: 'bot-1', name: 'GhostRider · SUI · 15m', status: 'paused', triggerType: 'strategy', symbol: 'SUI/USDT:USDT',
+      strategy: { id: GR, name: 'GhostRider' }, strategyDetails: { name: 'GhostRider' },
+      versionChannel: 'stable', pinnedVersion: { id: '6aa0000000000000000000a1', version: 4, semanticVersion: '4.06', code: 'secret' },
+      preset: null, timeframe: '15m',
+      spinConfig: { interval: 60, executionMode: 'continuous', nextSpinTime: '2026-10-24T10:00:00.000Z', spinCount: 9 },
+      parameterOverrides: { GR_MODE: 'fast', GR_LOOKBACK: 20 },
+      positionSizing: { type: 'percentage', value: 15, leverage: 2, stopLoss: 5 },
+      exchanges: [{ id: 'ex-paper-1', name: 'bybit', accountLabel: 'Bybit Paper', isPaper: true }],
+      openTradesCount: 0, openPosition: null,
+      ...extra,
+    }
+  }
+
+  function tradeWindBot(extra: Record<string, unknown> = {}) {
+    return ghostRiderBot({
+      name: 'Trade Wind · SUI · 4h', strategy: { id: TW, name: 'Trade Wind' }, strategyDetails: { name: 'Trade Wind' },
+      pinnedVersion: { id: '6aa0000000000000000000b1', version: 7, semanticVersion: '1.04' },
+      preset: TW_PRESET, timeframe: '4h', spinConfig: { interval: 3600, executionMode: 'on_bar_close' },
+      parameterOverrides: { ENABLE_SHORTS: true, EXIT_SCORE: 0, LB4: 0, VOL_SKIP_PCT: 80 },
+      ...extra,
+    })
+  }
+
+  /** Routes the mocked api() by method and path; records PATCH bodies. */
+  function routeApi({
+    before, after = before, patch = { doc: {} }, strategies = { 'trade-wind': { id: TW, name: 'Trade Wind' } },
+  }: { before: any, after?: any, patch?: any, strategies?: Record<string, any> }) {
+    let gets = 0
+    mockApi.mockImplementation(async (url: string, opts?: { method?: string, body?: any }) => {
+      if (opts?.method === 'PATCH') {
+        if (patch instanceof Error) throw patch
+        return patch
+      }
+      if (url.startsWith('/api/tradedroid/strategies/')) {
+        const ref = decodeURIComponent(url.slice('/api/tradedroid/strategies/'.length))
+        if (!strategies[ref]) throw new ApiError(404, 'HTTP_404', 'Strategy not found')
+        return { doc: strategies[ref] }
+      }
+      if (url === '/api/bots/bot-1') {
+        gets++
+        const doc = gets === 1 ? before : after
+        if (doc instanceof Error) throw doc
+        return { doc }
+      }
+      throw new Error(`unexpected call ${opts?.method ?? 'GET'} ${url}`)
+    })
+  }
+
+  const patchBodies = () => mockApi.mock.calls.filter((c) => c[1]?.method === 'PATCH').map((c) => c[1].body)
+
+  it('renames a bot: PATCH carries only the name, and the reply is the resulting config', async () => {
+    routeApi({ before: ghostRiderBot(), after: ghostRiderBot({ name: 'StormRider · SUI · 4h' }) })
+
+    const result = await getToolHandler('update_bot')({ id: 'bot-1', name: 'StormRider · SUI · 4h' })
+
+    expect(patchBodies()).toEqual([{ name: 'StormRider · SUI · 4h' }])
+    const out = await jsonOf(result)
+    expect(out.message).toContain('name: "StormRider · SUI · 4h"')
+    expect(out.bot).toMatchObject({
+      id: 'bot-1', name: 'StormRider · SUI · 4h', status: 'paused', isPaper: true,
+      strategy: { id: GR, name: 'GhostRider' }, versionChannel: 'stable', version: '4.06', timeframe: '15m',
+      executionMode: 'continuous', spinIntervalSeconds: 60,
+      parameterOverrides: { GR_MODE: 'fast', GR_LOOKBACK: 20 },
+      positionSizing: { type: 'percentage', value: 15, leverage: 2, stopLoss: 5 },
+    })
+    // Version source code and scheduler internals never reach the agent.
+    expect(JSON.stringify(out)).not.toContain('secret')
+    expect(JSON.stringify(out)).not.toContain('nextSpinTime')
+  })
+
+  it('switches strategy by slug in ONE PATCH: new strategy, stable channel, preset and old parameters cleared, spinConfig merged, size and leverage untouched', async () => {
+    routeApi({
+      before: ghostRiderBot(),
+      after: tradeWindBot({ preset: null, parameterOverrides: {} }),
+      patch: { doc: {}, warnings: ['Bybit can only supply 200 4h candles; Trade Wind 1.04 needs 300.'] },
+    })
+
+    const result = await getToolHandler('update_bot')({
+      id: 'bot-1', strategyId: 'trade-wind', timeframe: '4h', executionMode: 'on_bar_close',
+    })
+
+    expect(mockApi).toHaveBeenCalledWith('/api/tradedroid/strategies/trade-wind')
+    expect(patchBodies()).toEqual([{
+      strategy: TW,
+      preset: null,
+      versionChannel: 'stable',
+      pinnedVersion: null,
+      timeframe: '4h',
+      // The current interval is kept: spinConfig is merged like positionSizing.
+      spinConfig: { interval: 60, executionMode: 'on_bar_close' },
+      // GhostRider's parameters mean nothing to Trade Wind.
+      parameterOverrides: {},
+    }])
+    const out = await jsonOf(result)
+    expect(out.message).toContain('strategy: Trade Wind')
+    expect(out.bot).toMatchObject({ strategy: { id: TW, name: 'Trade Wind' }, version: '1.04', timeframe: '4h', positionSizing: { value: 15, leverage: 2 } })
+    expect(out.warnings).toEqual(['Bybit can only supply 200 4h candles; Trade Wind 1.04 needs 300.'])
+    expect(out.notes).toEqual(['The bot is paused: start it with start_bot when you are ready.'])
+  })
+
+  it('a strategy switch with parameterOverrides sets exactly those (nulls dropped), and pins a version when asked', async () => {
+    routeApi({ before: ghostRiderBot(), after: tradeWindBot() })
+
+    await getToolHandler('update_bot')({
+      id: 'bot-1', strategyId: TW, pinnedVersionId: '6aa0000000000000000000b1',
+      parameterOverrides: { ENABLE_SHORTS: false, LB4: null },
+    })
+
+    // An ObjectId is used as given: no lookup.
+    expect(mockApi).not.toHaveBeenCalledWith(expect.stringMatching(/^\/api\/tradedroid\/strategies\//))
+    expect(patchBodies()).toEqual([{
+      strategy: TW, preset: null, versionChannel: 'custom', pinnedVersion: '6aa0000000000000000000b1',
+      parameterOverrides: { ENABLE_SHORTS: false },
+    }])
+  })
+
+  it('on the same strategy, parameterOverrides merge into the current ones and a null removes a key', async () => {
+    routeApi({ before: tradeWindBot() })
+
+    await getToolHandler('update_bot')({ id: 'bot-1', parameterOverrides: { VOL_SKIP_PCT: 70, LB4: null } })
+
+    expect(patchBodies()).toEqual([{ parameterOverrides: { ENABLE_SHORTS: true, EXIT_SCORE: 0, VOL_SKIP_PCT: 70 } }])
+  })
+
+  it('resetParameterOverrides drops the current ones first; naming the current strategy is not a switch', async () => {
+    routeApi({ before: tradeWindBot() })
+
+    await getToolHandler('update_bot')({ id: 'bot-1', strategyId: TW, resetParameterOverrides: true, parameterOverrides: { LB4: 3 } })
+
+    // No strategy / preset / version fields: nothing about the strategy changes.
+    expect(patchBodies()).toEqual([{ parameterOverrides: { LB4: 3 } }])
+  })
+
+  it('an execution-mode-only change keeps the current interval (spinConfig is merged, never wiped)', async () => {
+    routeApi({ before: tradeWindBot() })
+
+    await getToolHandler('update_bot')({ id: 'bot-1', executionMode: 'continuous' })
+
+    expect(patchBodies()).toEqual([{ spinConfig: { interval: 3600, executionMode: 'continuous' } }])
+  })
+
+  it('a version channel change on the same strategy clears a stale pin', async () => {
+    routeApi({ before: tradeWindBot() })
+    await getToolHandler('update_bot')({ id: 'bot-1', versionChannel: 'beta' })
+    expect(patchBodies()).toEqual([{ versionChannel: 'beta', pinnedVersion: null }])
+  })
+
+  it('applies a preset by slug: only applyPreset (and explicit fields) are sent, so the server writes the preset\'s values; size and leverage are not sent', async () => {
+    routeApi({
+      before: ghostRiderBot(),
+      after: tradeWindBot(),
+      patch: { doc: {}, appliedPreset: { id: TW_PRESET, name: 'Trade Wind Long & Short', slug: 'trade-wind-long-short', strategy: TW } },
+    })
+
+    const result = await getToolHandler('update_bot')({ id: 'bot-1', presetId: 'trade-wind-long-short', name: 'Trade Wind · SUI · 4h' })
+
+    expect(patchBodies()).toEqual([{ name: 'Trade Wind · SUI · 4h', applyPreset: 'trade-wind-long-short' }])
+    const out = await jsonOf(result)
+    expect(out.message).toContain('preset applied: Trade Wind Long & Short')
+    expect(out.bot).toMatchObject({
+      strategy: { id: TW, name: 'Trade Wind' }, preset: TW_PRESET, timeframe: '4h', executionMode: 'on_bar_close', spinIntervalSeconds: 3600,
+      parameterOverrides: { ENABLE_SHORTS: true, EXIT_SCORE: 0, LB4: 0, VOL_SKIP_PCT: 80 },
+      positionSizing: { value: 15, leverage: 2 },
+    })
+    expect(out.notes).toEqual(['The bot is paused: start it with start_bot when you are ready.'])
+  })
+
+  it('a preset with explicit overrides sends only the explicit spin key and the overrides as given (the server merges them over the preset\'s)', async () => {
+    routeApi({ before: ghostRiderBot(), patch: { doc: {}, appliedPreset: { id: TW_PRESET, slug: 'trade-wind-long-short' } } })
+
+    await getToolHandler('update_bot')({ id: 'bot-1', presetId: TW_PRESET, spinIntervalSeconds: 1800, parameterOverrides: { LB4: 2, VOL_SKIP_PCT: null } })
+
+    expect(patchBodies()).toEqual([{ applyPreset: TW_PRESET, spinConfig: { interval: 1800 }, parameterOverrides: { LB4: 2, VOL_SKIP_PCT: null } }])
+  })
+
+  it('reports a server that cannot apply presets instead of claiming success', async () => {
+    routeApi({ before: ghostRiderBot(), patch: { doc: {} } })
+
+    const result = await getToolHandler('update_bot')({ id: 'bot-1', presetId: 'trade-wind-long-short' })
+
+    expect(result.isError).toBe(true)
+    expect((await jsonOf(result)).error.code).toBe('PRESET_UNSUPPORTED')
+  })
+
+  it('refuses a strategy switch on a bot that holds a position before sending anything, and says to pause it with stopAfterClose first', async () => {
+    routeApi({ before: ghostRiderBot({ status: 'active', openTradesCount: 1, openPosition: { symbol: 'SUI/USDT:USDT', side: 'short', size: 10 } }) })
+
+    const result = await getToolHandler('update_bot')({ id: 'bot-1', strategyId: 'trade-wind', timeframe: '4h' })
+
+    expect(result.isError).toBe(true)
+    const { error } = await jsonOf(result)
+    expect(error.code).toBe('OPEN_POSITION')
+    expect(error.message).toContain('holds an open position on SUI/USDT:USDT')
+    expect(error.message).toContain('stopAfterClose:true')
+    expect(patchBodies()).toEqual([])
+  })
+
+  it('surfaces the server\'s 409 OPEN_POSITION (e.g. a resting order the bot reading cannot see) with the same guidance', async () => {
+    routeApi({
+      before: ghostRiderBot(),
+      patch: new ApiError(409, 'OPEN_POSITION', 'This bot holds an open position or order on SUI/USDT:USDT. Close or cancel it (or use "stop after this position closes") before changing its strategy.'),
+    })
+
+    const result = await getToolHandler('update_bot')({ id: 'bot-1', strategyId: 'trade-wind' })
+
+    const { error } = await jsonOf(result)
+    expect(error.code).toBe('OPEN_POSITION')
+    expect(error.message).toContain('before changing its strategy')
+    expect(error.message).toContain('update_bot stopAfterClose:true')
+    expect(error.retryable).toBe(false)
+  })
+
+  it('scope: a LIVE bot\'s edit refused by the server for scope reports INSUFFICIENT_SCOPE naming mcp:live', async () => {
+    routeApi({
+      before: ghostRiderBot({ exchanges: [{ id: 'ex-live-1', name: 'hyperliquid', accountLabel: 'HL Vault', isPaper: false }] }),
+      patch: new ApiError(403, 'INSUFFICIENT_SCOPE', "This action requires the 'mcp:live' OAuth scope. The current token does not grant it."),
+    })
+
+    const result = await getToolHandler('update_bot')({ id: 'bot-1', strategyId: 'trade-wind' })
+
+    const { error } = await jsonOf(result)
+    expect(error.code).toBe('INSUFFICIENT_SCOPE')
+    expect(error.message).toContain('LIVE account')
+    expect(error.message).toContain('mcp:live')
+  })
+
+  it('scope: a paper bot is not gated client-side; the server decides (mcp:paper is enough)', async () => {
+    routeApi({ before: ghostRiderBot(), after: tradeWindBot() })
+
+    const result = await getToolHandler('update_bot')({ id: 'bot-1', strategyId: 'trade-wind' })
+
+    expect(result.isError).toBeUndefined()
+    expect(patchBodies()).toHaveLength(1)
+  })
+
+  it('an unknown strategy slug is STRATEGY_NOT_FOUND and nothing is written', async () => {
+    routeApi({ before: ghostRiderBot() })
+    const result = await getToolHandler('update_bot')({ id: 'bot-1', strategyId: 'no-such-strategy' })
+    expect((await jsonOf(result)).error.code).toBe('STRATEGY_NOT_FOUND')
+    expect(patchBodies()).toEqual([])
+  })
+
+  it('refuses contradictory version arguments before any request', async () => {
+    const handler = getToolHandler('update_bot')
+    const a = await handler({ id: 'bot-1', versionChannel: 'stable', pinnedVersionId: '6aa0000000000000000000b1' })
+    const b = await handler({ id: 'bot-1', versionChannel: 'custom' })
+    expect((await jsonOf(a)).error.code).toBe('INVALID_ARGUMENTS')
+    expect((await jsonOf(b)).error.code).toBe('INVALID_ARGUMENTS')
+    expect(mockApi).not.toHaveBeenCalled()
+  })
+
+  it('refuses strategy settings on a signal (webhook) bot', async () => {
+    routeApi({ before: ghostRiderBot({ triggerType: 'webhook' }) })
+    const result = await getToolHandler('update_bot')({ id: 'bot-1', timeframe: '4h' })
+    expect((await jsonOf(result)).error.code).toBe('NOT_A_STRATEGY_BOT')
+    expect(patchBodies()).toEqual([])
+  })
+
+  it('still succeeds when the read-back fails: the write landed, the config comes from the PATCH reply', async () => {
+    routeApi({ before: ghostRiderBot(), after: new ApiError(503, 'HTTP_503', 'down', true), patch: { doc: { id: 'bot-1', name: 'New', status: 'paused', timeframe: '15m' } } })
+    const result = await getToolHandler('update_bot')({ id: 'bot-1', name: 'New' })
+    const out = await jsonOf(result)
+    expect(out.bot).toMatchObject({ id: 'bot-1', name: 'New', status: 'paused', strategy: { id: GR } })
+  })
+
+  it('describes the flat rule, stopAfterClose first, and that size/leverage are untouched', () => {
+    const server = new McpServer({ name: 't', version: '0' }, { capabilities: {} })
+    const toolSpy = vi.spyOn(server, 'tool')
+    registerBotTools(server)
+    const call = toolSpy.mock.calls.find((c) => c[0] === 'update_bot')!
+    const desc = String(call[1])
+    expect(desc).toContain('FLAT')
+    expect(desc).toContain('stopAfterClose:true')
+    expect(desc).toMatch(/Size and leverage are NEVER changed unless you pass positionSizePercent \/ leverage/)
+    expect(desc).toContain('mcp:live')
+    const schema = call[2] as Record<string, any>
+    for (const key of ['name', 'strategyId', 'presetId', 'versionChannel', 'pinnedVersionId', 'timeframe', 'executionMode', 'spinIntervalSeconds', 'parameterOverrides', 'resetParameterOverrides']) {
+      expect(schema[key], key).toBeDefined()
+    }
+    expect(schema.strategyId.description).toMatch(/slug/)
+    expect(schema.presetId.description).toMatch(/slug/)
+    expect(schema.presetId.description).toMatch(/Never changes size or leverage/)
+  })
+
+  it('start_bot, stop_bot and delete_bot stay registered', () => {
+    for (const name of ['start_bot', 'stop_bot', 'delete_bot']) expect(() => getToolHandler(name)).not.toThrow()
   })
 })
 
