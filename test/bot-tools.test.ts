@@ -334,6 +334,7 @@ describe('deploy_bot', () => {
 
     expect(mockApi).toHaveBeenNthCalledWith(2, '/api/bots', {
       method: 'POST',
+      retry: false,
       body: {
         triggerType: 'strategy',
         strategy: 'strat-1',
@@ -370,6 +371,39 @@ describe('deploy_bot', () => {
     await handler({ strategyId: 'strat-1', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', timeframe: '4h', live: false, positionSizePercent: 10, leverage: 1 })
 
     expect(mockApi.mock.calls[1][1].body.timeframe).toBe('4h')
+  })
+
+  // Value: protects=one deploy_bot call creates at most one bot; fails_when=the POST /api/bots goes through api()'s default retries (a timeout or gateway 5xx resent → a second live bot on the same account); why_new=HIGH no-retry fix; seam=api mock; no_claim=api()'s own once-only send (api.test.ts)
+  it('sends the create POST once (retry: false); the exchange lookup keeps the default retries', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
+      .mockResolvedValueOnce({ doc: { id: 'new-bot-4' } })
+    await getToolHandler('deploy_bot')({ strategyId: 'strat-1', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1 })
+    expect(mockApi.mock.calls[0]).toEqual(['/api/exchanges'])
+    expect(mockApi.mock.calls[1][1]).toMatchObject({ method: 'POST', retry: false })
+  })
+
+  it.each([
+    ['a timeout', new ApiError(408, 'TIMEOUT', 'Request timed out', false), 'the request timed out'],
+    ['a network error', new ApiError(0, 'NETWORK_ERROR', 'Failed to reach TradeStaq API: fetch failed', false), 'a network error'],
+    ['a 504', new ApiError(504, 'HTTP_504', 'API returned 504 with a non-JSON response', false), 'HTTP 504'],
+  ])('%s on the create POST: DEPLOY_OUTCOME_UNKNOWN (the bot may exist, check list_bots), not retryable', async (_label, err, reason) => {
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockRejectedValueOnce(err)
+    const result = await getToolHandler('deploy_bot')({ strategyId: 'strat-1', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1 })
+    expect(result.isError).toBe(true)
+    const { error } = JSON.parse(result.content[0].text)
+    expect(error.code).toBe('DEPLOY_OUTCOME_UNKNOWN')
+    expect(error.retryable).toBe(false)
+    expect(error).not.toHaveProperty('retryAfterMs')
+    expect(error.message).toContain(reason)
+    expect(error.message).toContain('may have been created')
+    expect(error.message).toContain('list_bots')
+  })
+
+  it('a clean server refusal on the create POST keeps its own code and message', async () => {
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockRejectedValueOnce(new ApiError(403, 'HTTP_403', 'Tier limit exceeded', false))
+    const result = await getToolHandler('deploy_bot')({ strategyId: 'strat-1', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1 })
+    expect(JSON.parse(result.content[0].text).error).toMatchObject({ code: 'HTTP_403', message: 'Tier limit exceeded', retryable: false })
   })
 })
 
@@ -1004,7 +1038,10 @@ describe('close_position', () => {
 
     expect(mockApi).toHaveBeenNthCalledWith(2, '/api/positions/close', {
       method: 'POST',
-      body: { exchangeId: 'ex-1', symbol: 'BTC/USDT', side: 'long', size: 0.2 },
+      body: { exchangeId: 'ex-1', symbol: 'BTC/USDT', side: 'long', size: 0.2, requestId: expect.any(String) },
+      headers: { 'Idempotency-Key': expect.any(String) },
+      timeout: 120_000,
+      retry: false,
     })
   })
 
@@ -1059,7 +1096,10 @@ describe('close_position', () => {
     const result = await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 100 })
     expect(mockApi).toHaveBeenNthCalledWith(2, '/api/positions/close', {
       method: 'POST',
-      body: { exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', size: 52.81, botId: 'bot-sol' },
+      body: { exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', size: 52.81, botId: 'bot-sol', requestId: expect.any(String) },
+      headers: { 'Idempotency-Key': expect.any(String) },
+      timeout: 120_000,
+      retry: false,
     })
     expect(result.isError).toBeUndefined()
     const text = await textOf(result)
@@ -1088,5 +1128,79 @@ describe('close_position', () => {
     const result = await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 100 })
     expect(mockApi.mock.calls[1][1].body).not.toHaveProperty('botId')
     expect(await textOf(result)).toContain('Closed: 52.81 @ 191')
+  })
+
+  // Value: protects=a close that reaches the server twice is executed once (the server dedupes on the key); fails_when=no key is sent, the header and body disagree, or two tool calls share one key; why_new=HIGH double-close fix; seam=api mock; no_claim=the server's dedupe itself
+  it('sends one idempotency key per call: Idempotency-Key header = body requestId (a UUID), 120s, retry: false; the next call gets a new key', async () => {
+    mockApi.mockResolvedValueOnce({ positions: [SOL] }).mockResolvedValueOnce(closed())
+    await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 50 })
+    mockApi.mockResolvedValueOnce({ positions: [SOL] }).mockResolvedValueOnce(closed())
+    await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 50 })
+
+    // The positions lookup keeps api()'s defaults (it is a read).
+    expect(mockApi.mock.calls[0]).toEqual(['/api/v1/positions'])
+    const first = mockApi.mock.calls[1][1]
+    const second = mockApi.mock.calls[3][1]
+    for (const opts of [first, second]) {
+      expect(opts).toMatchObject({ method: 'POST', timeout: 120_000, retry: false })
+      expect(opts.body.requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+      expect(opts.headers['Idempotency-Key']).toBe(opts.body.requestId)
+    }
+    expect(second.body.requestId).not.toBe(first.body.requestId)
+  })
+
+  // Value: protects=the agent never re-closes a position whose close may already have executed; fails_when=CLOSE_IN_PROGRESS / CLOSE_UNCONFIRMED / a no-answer close come back as a generic (or retryable) error with no "check get_positions first"; why_new=HIGH double-close fix; seam=api mock; no_claim=the server's 409s
+  it('CLOSE_IN_PROGRESS: another close is running and may have executed; do not retry now, check get_positions', async () => {
+    mockApi
+      .mockResolvedValueOnce({ positions: [SOL] })
+      .mockRejectedValueOnce(new ApiError(409, 'CLOSE_IN_PROGRESS', 'A close for this position is already in progress.', false))
+    const result = await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 100 })
+    expect(result.isError).toBe(true)
+    const { error } = JSON.parse(await textOf(result))
+    expect(error.code).toBe('CLOSE_IN_PROGRESS')
+    expect(error.retryable).toBe(false)
+    expect(error.message).toContain('Another close of the long SOL/USDT position is already running')
+    expect(error.message).toContain('may already have executed')
+    expect(error.message).toContain('Do not retry now')
+    expect(error.message).toContain('check get_positions')
+  })
+
+  it('CLOSE_UNCONFIRMED: the close may have executed but could not be confirmed; check get_positions, never retry blindly', async () => {
+    mockApi
+      .mockResolvedValueOnce({ positions: [SOL] })
+      .mockRejectedValueOnce(new ApiError(409, 'CLOSE_UNCONFIRMED', 'Order sent; outcome unknown.', false, undefined, { success: false, code: 'CLOSE_UNCONFIRMED', closedOnExchange: 'maybe' }))
+    const result = await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 100 })
+    expect(result.isError).toBe(true)
+    const { error } = JSON.parse(await textOf(result))
+    expect(error).toMatchObject({ code: 'CLOSE_UNCONFIRMED', retryable: false, closedOnExchange: 'maybe' })
+    expect(error.message).toContain('may have executed on the exchange')
+    expect(error.message).toContain('could not be confirmed')
+    expect(error.message).toContain('Check get_positions before retrying')
+    expect(error.message).toContain('never retry it blindly')
+  })
+
+  it.each([
+    ['a timeout', new ApiError(408, 'TIMEOUT', 'Request timed out', false), 'the request timed out'],
+    ['a network error', new ApiError(0, 'NETWORK_ERROR', 'Failed to reach TradeStaq API: fetch failed', false), 'a network error'],
+    ['a 524', new ApiError(524, 'HTTP_524', 'API returned 524 with a non-JSON response', false), 'HTTP 524'],
+    ['a 500', new ApiError(500, 'SERVER_ERROR', 'boom', false), 'HTTP 500'],
+  ])('%s on the close POST: CLOSE_OUTCOME_UNKNOWN (may have executed, check get_positions), not retryable', async (_label, err, reason) => {
+    mockApi.mockResolvedValueOnce({ positions: [SOL] }).mockRejectedValueOnce(err)
+    const result = await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT', side: 'long', percentage: 100 })
+    expect(result.isError).toBe(true)
+    const { error } = JSON.parse(await textOf(result))
+    expect(error).toMatchObject({ code: 'CLOSE_OUTCOME_UNKNOWN', retryable: false, closedOnExchange: 'maybe' })
+    expect(error).not.toHaveProperty('retryAfterMs')
+    expect(error.message).toContain(reason)
+    expect(error.message).toContain('may have executed')
+    expect(error.message).toContain('Check get_positions before retrying')
+  })
+
+  it('the tool description tells the agent to check get_positions before closing again after an unknown outcome', () => {
+    const server = new McpServer({ name: 'test-server', version: '0.0.1' }, { capabilities: { logging: {} } })
+    const toolSpy = vi.spyOn(server, 'tool')
+    registerBotTools(server)
+    const description = toolSpy.mock.calls.find((c) => c[0] === 'close_position')![1] as string
+    expect(description).toContain('never call close_position again for it without checking get_positions first')
   })
 })

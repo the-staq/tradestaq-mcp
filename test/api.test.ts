@@ -306,6 +306,83 @@ describe('api', () => {
   })
 })
 
+// Value: protects=a non-idempotent write (close_position, deploy_bot) reaches the server at most once per call; fails_when=api() resends a retry:false request after a timeout / 429 / 5xx / network error (a 30s abort + re-POST closed a live position 2-3 times), or marks its error retryable so the agent resends it; why_new=HIGH double-close fix; seam=fetch stub; no_claim=the server's idempotency-key dedupe
+describe('api retry: false (send exactly once)', () => {
+  const abortError = () => Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })
+
+  it.each([
+    ['a 504', () => mockFetch.mockResolvedValue({ ok: false, status: 504, json: async () => { throw new SyntaxError('<html>') } }), { status: 504, code: 'HTTP_504' }],
+    ['a 503', () => mockFetch.mockResolvedValue({ ok: false, status: 503, json: async () => ({ error: { code: 'UNAVAILABLE', message: 'down' } }) }), { status: 503, code: 'UNAVAILABLE' }],
+    ['a 429', () => mockFetch.mockResolvedValue({ ok: false, status: 429, headers: new Headers({ 'retry-after': '2' }), json: async () => ({ error: { code: 'RATE_LIMITED', message: 'slow down' } }) }), { status: 429, code: 'RATE_LIMITED' }],
+    ['an AbortError timeout', () => mockFetch.mockRejectedValue(abortError()), { status: 408, code: 'TIMEOUT' }],
+    ['a network error', () => mockFetch.mockRejectedValue(new TypeError('fetch failed')), { status: 0, code: 'NETWORK_ERROR' }],
+  ])('%s: fetch is called once and the error is not retryable', async (_label, arrange, expected) => {
+    arrange()
+    const err = await api('/api/positions/close', { method: 'POST', body: { a: 1 }, retry: false }).catch((e) => e)
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err).toMatchObject({ ...expected, retryable: false })
+    expect(err.retryAfterMs).toBeUndefined()
+  })
+
+  it('the same failures without retry: false still retry (3 sends) and stay retryable', async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 504, json: async () => ({}) })
+    await expect(api('/api/x', { method: 'POST', body: {} })).rejects.toMatchObject({ status: 504, retryable: true })
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+
+    mockFetch.mockReset()
+    mockFetch.mockRejectedValue(abortError())
+    await expect(api('/api/x', { method: 'POST', body: {}, retry: true })).rejects.toMatchObject({ code: 'TIMEOUT', retryable: true })
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('a success is returned as usual', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ success: true }) })
+    await expect(api('/api/x', { method: 'POST', body: {}, retry: false })).resolves.toEqual({ success: true })
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('the timeout option still applies: aborts at the given ms, then is not resent', async () => {
+    vi.useFakeTimers()
+    try {
+      mockFetch.mockImplementation((_url: string, opts: any) => new Promise((_resolve, reject) => {
+        opts.signal.addEventListener('abort', () => reject(abortError()))
+      }))
+      const pending = api('/api/positions/close', { method: 'POST', body: {}, retry: false, timeout: 120_000 }).catch((e) => e)
+      let settled = false
+      void pending.then(() => { settled = true })
+      await vi.advanceTimersByTimeAsync(119_999)
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      // Checked before awaiting: a resend would hang on its own fresh timeout.
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+      expect(settled).toBe(true)
+      expect(await pending).toMatchObject({ code: 'TIMEOUT', retryable: false })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('api headers option', () => {
+  it('sends custom headers next to the fixed ones', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) })
+    await api('/api/positions/close', { method: 'POST', body: {}, headers: { 'Idempotency-Key': 'k-1' } })
+    const { headers } = mockFetch.mock.calls[0][1]
+    expect(headers['Idempotency-Key']).toBe('k-1')
+    expect(headers).toMatchObject({ Authorization: 'Bearer test-token', 'Content-Type': 'application/json', 'X-MCP-Source': 'tradestaq-mcp' })
+  })
+
+  it('a custom header cannot replace Authorization, in any letter case', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) })
+    await api('/api/x', { headers: { Authorization: 'Bearer attacker', authorization: 'Bearer attacker2', AUTHORIZATION: 'x', 'Idempotency-Key': 'k-2' } })
+    const { headers } = mockFetch.mock.calls[0][1]
+    const auth = Object.entries(headers).filter(([k]) => k.toLowerCase() === 'authorization')
+    expect(auth).toEqual([['Authorization', 'Bearer test-token']])
+    expect(headers['Idempotency-Key']).toBe('k-2')
+  })
+})
+
 describe('api request-context (hosted per-request token)', () => {
   it('uses the per-request bearer instead of the shared config token', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => ({ ok: 1 }) })

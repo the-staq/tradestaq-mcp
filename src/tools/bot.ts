@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { api, ApiError } from '../api.js'
 import { errorResult, jsonResult, withErrorHandling } from '../helpers.js'
@@ -16,6 +17,35 @@ function strategyNameOf(bot: any): string | undefined {
   if (bot.strategyDetails?.name) return bot.strategyDetails.name
   if (typeof bot.strategy === 'object' && bot.strategy) return bot.strategy.name
   return typeof bot.strategy === 'string' ? bot.strategy : undefined
+}
+
+// A write sent with retry: false that got no answer: it timed out, never reached the server
+// or the server/gateway failed (5xx, e.g. a Cloudflare 524 while the server kept working).
+// The action may have been carried out. Returns a short reason, or undefined for a clean answer.
+function noAnswerReason(err: unknown): string | undefined {
+  if (!(err instanceof ApiError)) return undefined
+  if (err.status === 408 || err.code === 'TIMEOUT') return 'the request timed out'
+  if (err.status === 0 || err.code === 'NETWORK_ERROR') return 'a network error'
+  if (err.status >= 500) return `HTTP ${err.status}`
+  return undefined
+}
+
+// close_position errors after which the close may have executed. Each says to check
+// get_positions first and is never retryable: a blind second close_position call could close
+// the position again (50% twice is 100%; a spot resend sells coins outside the lots).
+function closeMayHaveRunResult(err: unknown, position: string) {
+  if (!(err instanceof ApiError)) return undefined
+  if (err.code === 'CLOSE_IN_PROGRESS') {
+    return errorResult('CLOSE_IN_PROGRESS', `Another close of the ${position} position is already running and may already have executed. Do not retry now: check get_positions before closing it again.`)
+  }
+  if (err.code === 'CLOSE_UNCONFIRMED') {
+    return errorResult('CLOSE_UNCONFIRMED', `The close order for the ${position} position was sent, but its outcome could not be confirmed: it may have executed on the exchange. Check get_positions before retrying; never retry it blindly.`, { fields: { closedOnExchange: 'maybe' } })
+  }
+  const reason = noAnswerReason(err)
+  if (reason) {
+    return errorResult('CLOSE_OUTCOME_UNKNOWN', `The close request for the ${position} position got no answer (${reason}), so the close may have executed on the exchange. Check get_positions before retrying: do not call close_position again for it until you have.`, { fields: { closedOnExchange: 'maybe' } })
+  }
+  return undefined
 }
 
 // Only the fields an agent needs; requestedBy (a user id) is left out.
@@ -426,27 +456,39 @@ export function registerBotTools(server: McpServer) {
         )
       }
 
-      const data = await api<any>('/api/bots', {
-        method: 'POST',
-        body: {
-          triggerType: 'strategy',
-          strategy: strategyId,
-          exchange: [exchangeId],
-          symbol,
-          // Only sent when given: with no name the server names the bot, and
-          // with no timeframe it uses the strategy's own timeframe.
-          ...(name ? { name } : {}),
-          ...(timeframe ? { timeframe } : {}),
-          ...(market ? { market } : {}),
-          positionSizing: {
-            type: 'percentage',
-            value: positionSizePercent,
-            leverage,
-            ...(stopLoss !== undefined ? { stopLoss } : {}),
-            ...(takeProfit !== undefined ? { takeProfit } : {}),
+      // Creating a bot is not idempotent: sent once (retry: false), since a resend after a
+      // timeout or gateway 5xx could create a second bot trading the same account.
+      let data: any
+      try {
+        data = await api<any>('/api/bots', {
+          method: 'POST',
+          retry: false,
+          body: {
+            triggerType: 'strategy',
+            strategy: strategyId,
+            exchange: [exchangeId],
+            symbol,
+            // Only sent when given: with no name the server names the bot, and
+            // with no timeframe it uses the strategy's own timeframe.
+            ...(name ? { name } : {}),
+            ...(timeframe ? { timeframe } : {}),
+            ...(market ? { market } : {}),
+            positionSizing: {
+              type: 'percentage',
+              value: positionSizePercent,
+              leverage,
+              ...(stopLoss !== undefined ? { stopLoss } : {}),
+              ...(takeProfit !== undefined ? { takeProfit } : {}),
+            },
           },
-        },
-      })
+        })
+      } catch (err) {
+        const reason = noAnswerReason(err)
+        if (reason) {
+          return errorResult('DEPLOY_OUTCOME_UNKNOWN', `The deploy request got no answer (${reason}), so the bot may have been created. Check list_bots before deploying again: do not call deploy_bot again until you have.`)
+        }
+        throw err
+      }
       const bot = data.doc || data
       const mode = exchangeIsPaper ? 'PAPER (simulated)' : 'LIVE'
       return {
@@ -787,7 +829,7 @@ export function registerBotTools(server: McpServer) {
     return jsonResult(result)
   }))
 
-  server.tool('close_position', 'Close an open trading position by placing a market order — fully or partially. This moves real money when the position is live, so confirm intent with the user before calling. Find the exchangeId, symbol, and side with get_positions. Set percentage below 100 for a partial close. A position one bot holds is closed as that bot\'s close (its lots, its exit record). Reports what actually closed (size, price, PnL) as the server confirmed it; when nothing closed, it returns the server\'s reason as an error, never "closed".', {
+  server.tool('close_position', 'Close an open trading position by placing a market order — fully or partially. This moves real money when the position is live, so confirm intent with the user before calling. Find the exchangeId, symbol, and side with get_positions. Set percentage below 100 for a partial close. A position one bot holds is closed as that bot\'s close (its lots, its exit record). Reports what actually closed (size, price, PnL) as the server confirmed it; when nothing closed, it returns the server\'s reason as an error, never "closed". Each call sends its close once. After CLOSE_OUTCOME_UNKNOWN, CLOSE_UNCONFIRMED or CLOSE_IN_PROGRESS the position may already be closed: never call close_position again for it without checking get_positions first.', {
     exchangeId: z.string().describe('The exchange account ID where the position is open, from get_positions or list_exchanges.'),
     symbol: z.string().describe('Trading pair of the position, e.g. "BTC/USDT".'),
     side: z.enum(['long', 'short']).describe('Position side, from get_positions.'),
@@ -811,10 +853,25 @@ export function registerBotTools(server: McpServer) {
     // one bot holds it (botCount 1). The server then closes it as that bot's close.
     const ownerBotId = botId || (Number(position.botCount) === 1 && position.botId ? String(position.botId) : undefined)
 
-    const data = await api<any>('/api/positions/close', {
-      method: 'POST',
-      body: { exchangeId, symbol, side, size, ...(ownerBotId ? { botId: ownerBotId } : {}) },
-    })
+    // One idempotency key per tool call, sent as the Idempotency-Key header and body requestId:
+    // a close that reaches the server twice gets the first close's result, not a second order.
+    // Sent once (retry: false) with 120s for the server's venue rechecks: resending after a
+    // timeout or a gateway 5xx while the first close still runs would close the position again.
+    const requestId = randomUUID()
+    let data: any
+    try {
+      data = await api<any>('/api/positions/close', {
+        method: 'POST',
+        body: { exchangeId, symbol, side, size, ...(ownerBotId ? { botId: ownerBotId } : {}), requestId },
+        headers: { 'Idempotency-Key': requestId },
+        timeout: 120_000,
+        retry: false,
+      })
+    } catch (err) {
+      const mayHaveRun = closeMayHaveRunResult(err, `${side} ${symbol}`)
+      if (mayHaveRun) return mayHaveRun
+      throw err
+    }
     // A close is reported only when the server confirms what it closed: `closedSize` (booked)
     // or `filledSize` (what the exchange filled). A bare success closed nothing that it could
     // show (prod 2026-10-24: "Position closed." for three paper closes that sold nothing).

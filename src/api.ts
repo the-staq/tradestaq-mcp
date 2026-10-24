@@ -142,9 +142,37 @@ function parseRetryAfter(res: Response): number | undefined {
   return Number.isFinite(secs) && secs >= 0 ? Math.min(secs * 1000, 30_000) : undefined
 }
 
+export interface ApiOptions {
+  method?: string
+  body?: unknown
+  /** Abort after this many ms (default 30s). */
+  timeout?: number
+  /**
+   * false: send the request exactly ONCE. No retry on a timeout, 429, 5xx or network error,
+   * and every error it throws has retryable: false, so the agent is never told to retry
+   * either. For non-idempotent writes (closing a position, creating a bot), where a resend
+   * after a timeout or a gateway 5xx can repeat an action the server already carried out.
+   * The one 401 -> token refresh -> resend still happens: a 401 means the server did nothing.
+   */
+  retry?: boolean
+  /** Extra request headers. They never replace Authorization, Content-Type or X-MCP-Source. */
+  headers?: Record<string, string>
+}
+
+// Headers api() always sets itself; a caller's `headers` cannot replace them.
+const FIXED_HEADERS = new Set(['authorization', 'content-type', 'x-mcp-source'])
+
+function extraHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    if (!FIXED_HEADERS.has(name.toLowerCase())) out[name] = value
+  }
+  return out
+}
+
 export async function api<T = unknown>(
   path: string,
-  options: { method?: string; body?: unknown; timeout?: number } = {},
+  options: ApiOptions = {},
 ): Promise<T> {
   const store = requestContext.getStore()
   // Stdio mode: proactively rotate BEFORE reading the token, so an expired
@@ -164,6 +192,9 @@ export async function api<T = unknown>(
   }
 
   const url = `${config.baseUrl}${path}`
+  // retry: false → one send. Its errors are never retryable (below), so the loop only goes
+  // round again for the 401 refresh resend.
+  const retry = options.retry !== false
   let lastErr: ApiError | undefined
   let recovered401 = false
 
@@ -181,6 +212,7 @@ export async function api<T = unknown>(
       const res = await fetch(url, {
         method: options.method ?? 'GET',
         headers: {
+          ...extraHeaders(options.headers),
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
           'X-MCP-Source': 'tradestaq-mcp',
@@ -201,7 +233,7 @@ export async function api<T = unknown>(
       }
 
       if (!res.ok) {
-        const retryable = res.status === 429 || res.status >= 500
+        const retryable = retry && (res.status === 429 || res.status >= 500)
         const retryAfterMs = retryable ? parseRetryAfter(res) : undefined
 
         // OAuth insufficient_scope (RFC 6749 §5.2). The server-provided
@@ -243,8 +275,8 @@ export async function api<T = unknown>(
         err instanceof ApiError
           ? err
           : (err as Error).name === 'AbortError'
-            ? new ApiError(408, 'TIMEOUT', 'Request timed out', true)
-            : new ApiError(0, 'NETWORK_ERROR', `Failed to reach TradeStaq API: ${(err as Error).message}`, true)
+            ? new ApiError(408, 'TIMEOUT', 'Request timed out', retry)
+            : new ApiError(0, 'NETWORK_ERROR', `Failed to reach TradeStaq API: ${(err as Error).message}`, retry)
 
       // stdio: a 401 despite the proactive refresh (token revoked, clock skew,
       // or an expiry we missed) — try ONE rotation, then retry with the new
@@ -261,7 +293,7 @@ export async function api<T = unknown>(
       }
 
       // Retry transient failures (429 / 5xx / timeout / network) with backoff.
-      if (apiErr.retryable && attempt < MAX_RETRIES) {
+      if (retry && apiErr.retryable && attempt < MAX_RETRIES) {
         lastErr = apiErr
         continue
       }
@@ -272,5 +304,5 @@ export async function api<T = unknown>(
   }
 
   // Retries exhausted.
-  throw lastErr ?? new ApiError(0, 'NETWORK_ERROR', 'Request failed after retries', true)
+  throw lastErr ?? new ApiError(0, 'NETWORK_ERROR', 'Request failed after retries', retry)
 }
