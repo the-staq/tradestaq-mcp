@@ -145,6 +145,138 @@ function sectionError(err: unknown) {
   return e
 }
 
+// --- update_bot helpers --------------------------------------------------------
+
+const OBJECT_ID_RE = /^[0-9a-f]{24}$/i
+const VERSION_CHANNELS = ['stable', 'beta', 'latest', 'custom'] as const
+const EXECUTION_MODES = ['on_bar_close', 'continuous'] as const
+// Strategy parameter names as strategies declare them (e.g. ENABLE_SHORTS, rsiPeriod).
+const PARAM_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/
+const PARAM_VALUE = z.union([
+  z.number(), z.string().max(200), z.boolean(), z.null(),
+  z.array(z.union([z.number(), z.string().max(100)])).max(50),
+])
+const MAX_OVERRIDES_SHOWN = 40
+const FLAT_HINT = 'Pause it first with update_bot stopAfterClose:true (it keeps managing the position, opens nothing new and pauses once flat), wait until get_bot_status shows no openPosition, then retry.'
+
+/** An id from a string, an ObjectId-like or a populated doc ({ id } / { _id } / { value }). */
+function idOf(v: unknown): string {
+  if (!v) return ''
+  if (typeof v === 'string') return v
+  if (typeof v === 'object') return String((v as any).id ?? (v as any)._id ?? (v as any).value ?? '')
+  return String(v)
+}
+
+/** A strategy ID as given, or a slug resolved through the strategy route (it takes either). */
+async function resolveStrategyRef(ref: string): Promise<{ id: string, name?: string }> {
+  const value = ref.trim()
+  if (OBJECT_ID_RE.test(value)) return { id: value }
+  const notFound = () => new ApiError(404, 'STRATEGY_NOT_FOUND', `No strategy "${value}" that you can deploy. Use list_strategies for IDs, or pass the strategy's exact slug.`, false)
+  let raw: any
+  try {
+    raw = await api<any>(`/api/tradedroid/strategies/${encodeURIComponent(value)}`)
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 404 || err.status === 403)) throw notFound()
+    throw err
+  }
+  const doc = raw?.doc || raw
+  const id = idOf(doc)
+  if (!OBJECT_ID_RE.test(id)) throw notFound()
+  const name = capText(doc?.name, 80)
+  return { id, ...(name ? { name } : {}) }
+}
+
+/** GET /api/bots/:id's open-position facts: openTradesCount (open lots) and openPosition (largest leg). */
+function holdsPosition(bot: any): boolean {
+  return (typeof bot?.openTradesCount === 'number' && bot.openTradesCount > 0)
+    || (!!bot?.openPosition && typeof bot.openPosition === 'object')
+}
+
+function openPositionError(id: string, bot: any, what: 'strategy' | 'timeframe'): ApiError {
+  const symbol = capText(bot?.openPosition?.symbol, 40) ?? capText(bot?.symbol, 40)
+  const why = what === 'strategy'
+    ? 'the new strategy would adopt a position it did not open'
+    : 'the position would be managed on a timeframe it was not opened on'
+  return new ApiError(409, 'OPEN_POSITION', `Bot ${id} holds an open position${symbol ? ` on ${symbol}` : ''}, so its ${what} cannot change now: ${why}. ${FLAT_HINT}`, false)
+}
+
+/** The PATCH error with what the agent needs to act on it; anything else unchanged. */
+function explainPatchError(err: unknown, id: string, bot: any): unknown {
+  if (!(err instanceof ApiError)) return err
+  if (err.status === 409 && err.code === 'OPEN_POSITION') {
+    return new ApiError(409, 'OPEN_POSITION', `${capText(err.message, 300) ?? `Bot ${id} holds an open position or order.`} ${FLAT_HINT}`, false)
+  }
+  if (err.code === 'INSUFFICIENT_SCOPE' && primaryExchangeOf(bot)?.isPaper === false) {
+    return new ApiError(403, 'INSUFFICIENT_SCOPE', `Bot ${id} trades on a LIVE account, so any change to it needs the mcp:live scope. ${err.message}`, false)
+  }
+  return err
+}
+
+/** The bot's stored overrides when they are an object (a legacy JSON string is ignored, as the engine does). */
+function currentOverrides(bot: any): Record<string, unknown> {
+  const v = bot?.parameterOverrides
+  return v && typeof v === 'object' && !Array.isArray(v) ? { ...v } : {}
+}
+
+/**
+ * What a strategy bot runs, from GET /api/bots/:id (fields copied by name): the version
+ * channel and the version it runs, preset, timeframe, mode, interval and parameter
+ * overrides -- what update_bot can set. Version code and scheduler internals stay out.
+ */
+function strategyConfigView(b: any) {
+  const spin = b?.spinConfig || {}
+  // GET resolves pinnedVersion to the version the bot runs (its channel's, or the pin).
+  const pv = b?.pinnedVersion && typeof b.pinnedVersion === 'object' ? b.pinnedVersion : null
+  const overrides = currentOverrides(b)
+  const keys = Object.keys(overrides)
+  const shown = Object.fromEntries(keys.slice(0, MAX_OVERRIDES_SHOWN).map((k) => {
+    const v = overrides[k]
+    return [k, typeof v === 'string' ? capText(v, 100) : v]
+  }))
+  return compact({
+    versionChannel: b?.versionChannel || 'stable',
+    version: pv ? (pv.semanticVersion ?? pv.version) : undefined,
+    versionId: pv ? (idOf(pv) || undefined) : (typeof b?.pinnedVersion === 'string' ? b.pinnedVersion : undefined),
+    preset: idOf(b?.preset) || null,
+    timeframe: b?.timeframe,
+    executionMode: spin.executionMode,
+    spinIntervalSeconds: num(spin.interval),
+    parameterOverrides: shown,
+    parameterOverridesTotal: keys.length > MAX_OVERRIDES_SHOWN ? keys.length : undefined,
+  })
+}
+
+/** The bot's configuration after an update, from GET /api/bots/:id (fields copied by name). */
+function botConfigView(b: any) {
+  const ex = primaryExchangeOf(b || {})
+  const ps = b?.positionSizing || {}
+  const strategyName = b?.strategyDetails?.name ?? (b?.strategy && typeof b.strategy === 'object' ? b.strategy.name : undefined)
+  return compact({
+    id: b?.id || b?._id,
+    name: b?.name,
+    status: b?.status,
+    isPaper: ex ? !!ex.isPaper : undefined,
+    exchange: ex?.accountLabel || ex?.name,
+    symbol: b?.symbol,
+    strategy: compact({ id: idOf(b?.strategy) || undefined, name: capText(strategyName, 80) }),
+    ...strategyConfigView(b),
+    positionSizing: compact({ type: ps.type, value: ps.value, leverage: ps.leverage, stopLoss: ps.stopLoss, takeProfit: ps.takeProfit }),
+    openPosition: b?.openPosition,
+    stopAfterClose: b?.stopAfterClose ? stopAfterCloseView(b.stopAfterClose) : undefined,
+  })
+}
+
+/** PATCH's `warnings` (history supply, interval fit, pin notes) and legacy `warning`, capped. */
+function serverWarnings(res: any): string[] {
+  const out: string[] = []
+  for (const w of [...(Array.isArray(res?.warnings) ? res.warnings : []), res?.warning]) {
+    const text = capText(w, 300)
+    if (text && !out.includes(text)) out.push(text)
+    if (out.length >= 10) break
+  }
+  return out
+}
+
 export function registerBotTools(server: McpServer) {
 
   server.tool('list_bots', 'List all your trading bots with status and performance.', {}, withErrorHandling(async () => {
@@ -163,7 +295,7 @@ export function registerBotTools(server: McpServer) {
     }))
   }))
 
-  server.tool('get_bot_status', 'Get detailed status, configuration, and live performance for a specific trading bot by ID. Returns its run status, the strategy/symbol/exchange it trades, whether it is paper or live, P&L, win rate, total trades, and risk config (leverage, stop-loss, take-profit). Use it to check how a deployed bot is doing. stopAfterClose.enabled = true means the bot will pause itself once its current position closes (set with update_bot); completedAt is when it last did. Read-only — to stop a bot use stop_bot or update_bot stopAfterClose. Get bot IDs from list_bots.', {
+  server.tool('get_bot_status', 'Get detailed status, configuration, and live performance for a specific trading bot by ID. Returns its run status, the strategy/symbol/exchange it trades, whether it is paper or live, P&L, win rate, total trades, risk config (leverage, stop-loss, take-profit, position size) and, for a strategy bot, strategyConfig (version channel and the version it runs, preset, timeframe, execution mode, interval, parameter overrides: what update_bot can change). Use it to check how a deployed bot is doing. stopAfterClose.enabled = true means the bot will pause itself once its current position closes (set with update_bot); completedAt is when it last did. Read-only — to stop a bot use stop_bot or update_bot stopAfterClose. Get bot IDs from list_bots.', {
     id: z.string().describe('The bot ID to inspect, obtained from list_bots.'),
   }, { title: 'Get Bot Status', readOnlyHint: true }, withErrorHandling(async ({ id }) => {
     const raw = await api<any>(`/api/bots/${id}`)
@@ -186,7 +318,11 @@ export function registerBotTools(server: McpServer) {
         leverage: data.positionSizing?.leverage,
         stopLoss: data.positionSizing?.stopLoss,
         takeProfit: data.positionSizing?.takeProfit,
+        positionSize: data.positionSizing?.value,
+        positionSizeType: data.positionSizing?.type,
       },
+      // What update_bot can change on a strategy bot (e.g. to copy another bot's settings).
+      ...(data.triggerType === 'strategy' ? { strategyConfig: strategyConfigView(data) } : {}),
       openPosition: data.openPosition,
       ...(data.stopAfterClose ? { stopAfterClose: stopAfterCloseView(data.stopAfterClose) } : {}),
     })
@@ -324,28 +460,62 @@ export function registerBotTools(server: McpServer) {
 
   server.tool(
     'update_bot',
-    'Update a deployed bot\'s risk settings (leverage, position size %, stop loss, take profit), its trade-notification toggle, and/or stopAfterClose (a graceful stop: the bot keeps managing its open position, opens no new entries, and pauses itself once flat; the owner is notified once). For risk or notification changes it fetches the bot\'s current settings first and merges your changes on top — the underlying PATCH endpoint expects full group objects (positionSizing, messaging/manualMessaging), so a naive partial update would silently wipe out any field you didn\'t mention. stopAfterClose is a plain top-level field and needs no fetch. Get bot IDs from list_bots; check current values with get_bot_status first.',
+    'Edit a deployed bot. One call can rename it, switch it to another strategy or apply a preset, change its timeframe, execution mode or run interval, set strategy parameters, change its version channel, and change its risk settings (leverage, position size %, stop loss, take profit), trade notifications or stopAfterClose. All of it goes in ONE update, so a strategy switch never lands half-done.\n\n' +
+    'Merging: the bot\'s current settings are fetched first and your changes go on top. Grouped settings (positionSizing, messaging, spinConfig, parameterOverrides) are merged, never wiped by a partial change. Size and leverage are NEVER changed unless you pass positionSizePercent / leverage, also when you switch strategy or apply a preset.\n\n' +
+    'Strategy switch (strategyId) and timeframe change need the bot to be FLAT: no open position and no working order. A bot that holds one is refused (OPEN_POSITION) and nothing is changed, because the new strategy would adopt a position it did not open (e.g. a long-only strategy inheriting a short). Pause it first with stopAfterClose:true (it keeps managing the position, opens nothing new and pauses once flat), wait until get_bot_status shows no openPosition, then switch. A switch starts the strategy state over and drops the old strategy\'s parameters, preset and stale owed exits; the new strategy runs its stable channel unless you pass versionChannel / pinnedVersionId. The bot keeps its status: a paused bot stays paused until you start_bot it.\n\n' +
+    'Preset (presetId): applies it as the dashboard does when you pick one: its strategy, parameter overrides, timeframe, execution mode / interval and version, with anything you pass explicitly on top. The same flat rule applies when it changes the strategy or timeframe.\n\n' +
+    'Scope: editing a paper bot needs mcp:paper; any change to a LIVE bot (rename, strategy, timeframe, parameters, risk) needs mcp:live. The server enforces it (INSUFFICIENT_SCOPE).\n\n' +
+    'Returns the resulting config (strategy, version and channel, timeframe, mode, parameter overrides, size, leverage, status) and any server warnings, e.g. that the exchange cannot supply enough candle history. A stopAfterClose-only call returns a one-line confirmation. Get bot IDs from list_bots; check current values with get_bot_status.',
     {
       id: z.string().describe('The bot ID to update, obtained from list_bots.'),
+      name: z.string().trim().min(1).max(120).optional().describe('New bot name. Omit to keep it.'),
+      strategyId: z.string().min(1).max(100).optional().describe('Switch to this strategy: its ID or slug (e.g. "trade-wind", "supertrend-momentum"). The bot must be flat (see above). Its parameter overrides and preset are cleared unless you pass parameterOverrides / presetId; size and leverage are kept. Omit to keep the strategy.'),
+      presetId: z.string().min(1).max(100).optional().describe('Apply this bot preset: its ID or slug (e.g. "trade-wind-long-short"). Writes the preset\'s strategy, parameter overrides, timeframe, execution mode / interval and version; anything you pass explicitly wins. Never changes size or leverage.'),
+      versionChannel: z.enum(VERSION_CHANNELS).optional().describe('Strategy version channel: "stable" (default for a switch), "beta", "latest", or "custom" (needs pinnedVersionId). Omit to keep it.'),
+      pinnedVersionId: z.string().min(1).max(64).optional().describe('Pin this strategy version ID (sets versionChannel "custom"). Version IDs come from list_strategy_versions.'),
+      timeframe: z.string().min(1).max(8).optional().describe('Candle timeframe the bot trades on, e.g. "15m", "1h", "4h". Changing it needs the bot to be flat. Omit to keep it.'),
+      executionMode: z.enum(EXECUTION_MODES).optional().describe('"on_bar_close" runs the strategy once per closed candle (what backtests simulate); "continuous" runs it every interval. Omit to keep it.'),
+      spinIntervalSeconds: z.number().int().min(5).max(86_400).optional().describe('Run interval in seconds. An on_bar_close bot still runs every closed bar; the server brings a longer interval down to the bar. Omit to keep it.'),
+      parameterOverrides: z.record(z.string().regex(PARAM_KEY_RE), PARAM_VALUE).optional().describe('Strategy parameters to set, e.g. {"ENABLE_SHORTS": true, "VOL_SKIP_PCT": 80}. Merged into the bot\'s current overrides (or the preset\'s, with presetId); a null value removes that key so the strategy default runs. After a strategy switch these are the only overrides.'),
+      resetParameterOverrides: z.boolean().optional().describe('true: drop all current parameter overrides first (the strategy defaults run), then apply parameterOverrides if given.'),
       leverage: z.number().min(1).max(125).optional().describe('New leverage. Omit to leave unchanged.'),
       positionSizePercent: z.number().min(0).max(100).optional().describe('New position size as a percentage of account balance per trade. Omit to leave unchanged.'),
       stopLoss: z.number().optional().describe('New stop loss %. Omit to leave unchanged.'),
       takeProfit: z.number().optional().describe('New take profit %. Omit to leave unchanged.'),
       notifyOnTrade: z.boolean().optional().describe('Whether to send a Telegram notification for each trade this bot executes. Omit to leave unchanged.'),
-      stopAfterClose: z.boolean().optional().describe('true: keep managing the open position, open no new entries, pause automatically once flat (immediately if already flat); false: cancel. Only an active bot can be set. Changing the bot\'s status (start_bot/stop_bot) also cancels it. Omit to leave unchanged.'),
+      stopAfterClose: z.boolean().optional().describe('true: keep managing the open position, open no new entries, pause automatically once flat (immediately if already flat); false: cancel. Only an active bot can be set. Changing the bot\'s status (start_bot/stop_bot) also cancels it. Use it to get a bot flat before a strategy or timeframe change. Omit to leave unchanged.'),
     },
     { title: 'Update Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-    withErrorHandling(async ({ id, leverage, positionSizePercent, stopLoss, takeProfit, notifyOnTrade, stopAfterClose }) => {
+    withErrorHandling(async (args) => {
+      const {
+        id, name, strategyId, presetId, versionChannel, pinnedVersionId, timeframe, executionMode, spinIntervalSeconds,
+        parameterOverrides, resetParameterOverrides, leverage, positionSizePercent, stopLoss, takeProfit, notifyOnTrade, stopAfterClose,
+      } = args
       const body: Record<string, unknown> = {}
       const parts: string[] = []
 
       const riskChanged = leverage !== undefined || positionSizePercent !== undefined || stopLoss !== undefined || takeProfit !== undefined
-      // Only the grouped fields need the current bot for fetch-and-merge.
+      const spinChanged = executionMode !== undefined || spinIntervalSeconds !== undefined
+      const strategyFieldsChanged = strategyId !== undefined || presetId !== undefined || versionChannel !== undefined
+        || pinnedVersionId !== undefined || timeframe !== undefined || spinChanged
+        || parameterOverrides !== undefined || resetParameterOverrides === true
+      const configChanged = name !== undefined || strategyFieldsChanged
+
+      // Contradictions are refused before anything is read or written.
+      if (pinnedVersionId !== undefined && versionChannel !== undefined && versionChannel !== 'custom') {
+        throw new ApiError(400, 'INVALID_ARGUMENTS', `pinnedVersionId pins a version, which is versionChannel "custom", not "${versionChannel}". Pass one or the other.`, false)
+      }
+      if (versionChannel === 'custom' && pinnedVersionId === undefined && presetId === undefined) {
+        throw new ApiError(400, 'INVALID_ARGUMENTS', 'versionChannel "custom" needs pinnedVersionId (a version ID from list_strategy_versions).', false)
+      }
+
+      // Only the grouped fields and config edits need the current bot (fetch-and-merge).
       let bot: any = {}
-      if (riskChanged || notifyOnTrade !== undefined) {
+      if (riskChanged || notifyOnTrade !== undefined || configChanged) {
         const raw = await api<any>(`/api/bots/${id}`)
         bot = raw.doc || raw
       }
+
       if (riskChanged) {
         const current = bot.positionSizing || { type: 'percentage', value: 10, leverage: 1 }
         const positionSizing = {
@@ -371,13 +541,108 @@ export function registerBotTools(server: McpServer) {
         parts.push(`notifications: ${notifyOnTrade ? 'on' : 'off'}`)
       }
 
+      let switchedTo: { id: string, name?: string } | null = null
+      if (configChanged) {
+        if (name !== undefined) {
+          body.name = name
+          parts.push(`name: "${name}"`)
+        }
+        if (strategyFieldsChanged && bot.triggerType && bot.triggerType !== 'strategy') {
+          throw new ApiError(400, 'NOT_A_STRATEGY_BOT', `Bot ${id} is a ${bot.triggerType} bot: strategy, preset, timeframe, execution and parameter settings only apply to strategy bots.`, false)
+        }
+
+        const target = strategyId !== undefined ? await resolveStrategyRef(strategyId) : null
+        const strategySwitch = !!target && target.id !== idOf(bot.strategy)
+        const timeframeChange = timeframe !== undefined && timeframe !== bot.timeframe
+        // The server refuses these too (under the bot's locks, counting working orders);
+        // checked here first so an older server can never switch a holding bot.
+        if ((strategySwitch || timeframeChange) && holdsPosition(bot)) {
+          throw openPositionError(id, bot, strategySwitch ? 'strategy' : 'timeframe')
+        }
+
+        if (presetId !== undefined) {
+          // Resolved and applied by the server (PATCH applyPreset): the preset's strategy,
+          // parameters, timeframe, spin and version, with the explicit fields below on top.
+          body.applyPreset = presetId
+          if (target) body.strategy = target.id
+        } else if (strategySwitch) {
+          body.strategy = target!.id
+          // A preset belongs to one strategy, and so does a pinned version.
+          body.preset = null
+          body.versionChannel = pinnedVersionId !== undefined ? 'custom' : (versionChannel ?? 'stable')
+          body.pinnedVersion = pinnedVersionId ?? null
+        }
+        if (strategySwitch) {
+          switchedTo = target
+          parts.push(`strategy: ${target!.name ?? target!.id}`)
+        }
+        if (!strategySwitch || presetId !== undefined) {
+          if (pinnedVersionId !== undefined) {
+            body.versionChannel = 'custom'
+            body.pinnedVersion = pinnedVersionId
+          } else if (versionChannel !== undefined) {
+            body.versionChannel = versionChannel
+            if (versionChannel !== 'custom' && presetId === undefined) body.pinnedVersion = null
+          }
+        }
+        if (body.versionChannel !== undefined && (versionChannel !== undefined || pinnedVersionId !== undefined)) {
+          parts.push(`version: ${body.versionChannel}${pinnedVersionId ? ` ${pinnedVersionId}` : ''}`)
+        }
+
+        if (timeframe !== undefined) {
+          body.timeframe = timeframe
+          parts.push(`timeframe: ${timeframe}`)
+        }
+
+        if (spinChanged) {
+          // spinConfig is a group: the bot's current mode and interval, with the change on
+          // top. With a preset only the explicit keys go, so the preset's fill the rest.
+          const current = presetId === undefined ? (bot.spinConfig || {}) : {}
+          const spin: Record<string, unknown> = {}
+          if (typeof current.interval === 'number') spin.interval = current.interval
+          if ((EXECUTION_MODES as readonly string[]).includes(current.executionMode)) spin.executionMode = current.executionMode
+          if (executionMode !== undefined) spin.executionMode = executionMode
+          if (spinIntervalSeconds !== undefined) spin.interval = spinIntervalSeconds
+          body.spinConfig = spin
+          if (executionMode !== undefined) parts.push(`execution: ${executionMode}`)
+          if (spinIntervalSeconds !== undefined) parts.push(`interval: ${spinIntervalSeconds}s`)
+        }
+
+        if (presetId !== undefined) {
+          // On top of the preset's own overrides, server-side (a null removes one there).
+          if (parameterOverrides !== undefined) body.parameterOverrides = parameterOverrides
+        } else if (parameterOverrides !== undefined || resetParameterOverrides === true || strategySwitch) {
+          // PATCH writes parameterOverrides whole: merge onto what the bot has. A new
+          // strategy starts from none (the old strategy's keys mean nothing to it).
+          const base = strategySwitch || resetParameterOverrides === true ? {} : currentOverrides(bot)
+          const merged: Record<string, unknown> = { ...base, ...(parameterOverrides ?? {}) }
+          for (const [k, v] of Object.entries(merged)) if (v === null) delete merged[k]
+          body.parameterOverrides = merged
+          parts.push(`parameter overrides: ${Object.keys(merged).length} set`)
+        }
+      }
+
       if (stopAfterClose !== undefined) body.stopAfterClose = stopAfterClose
 
       if (!Object.keys(body).length) {
         throw new ApiError(400, 'NO_CHANGES', 'No fields provided to update.', false)
       }
 
-      const res = await api<any>(`/api/bots/${id}`, { method: 'PATCH', body })
+      let res: any
+      try {
+        res = await api<any>(`/api/bots/${id}`, { method: 'PATCH', body })
+      } catch (err) {
+        throw explainPatchError(err, id, bot)
+      }
+
+      if (presetId !== undefined) {
+        const applied = res?.appliedPreset
+        if (!applied || typeof applied !== 'object') {
+          throw new ApiError(501, 'PRESET_UNSUPPORTED', `The TradeStaq server did not apply preset "${presetId}": this server version cannot apply presets yet. The preset was not applied${Object.keys(body).length > 1 ? '; the other fields in this call were saved' : ''}.`, false)
+        }
+        parts.push(`preset applied: ${capText(applied.name, 80) ?? capText(applied.slug, 80) ?? presetId}`)
+      }
+
       if (stopAfterClose !== undefined) {
         const updated = res?.doc || res || {}
         const status = typeof updated.status === 'string' ? updated.status : undefined
@@ -391,7 +656,37 @@ export function registerBotTools(server: McpServer) {
           parts.push('stop after close: the bot will keep managing its open position, open no new entries, and pause after its current position closes')
         }
       }
-      return { content: [{ type: 'text' as const, text: `Bot ${id} updated. ${parts.join(', ')}` }] }
+
+      const message = `Bot ${id} updated. ${parts.join(', ')}`
+      // A stopAfterClose-only call keeps its one-line reply (no GET before or after).
+      if (!riskChanged && notifyOnTrade === undefined && !configChanged) {
+        return { content: [{ type: 'text' as const, text: message }] }
+      }
+
+      // The resulting config as the server now reports it (strategy name, the version it
+      // runs). The write already landed, so a failed read falls back to the PATCH reply.
+      let after: any = null
+      try {
+        const raw = await api<any>(`/api/bots/${id}`)
+        after = raw?.doc || raw
+      } catch {
+        // Reported from the PATCH response below.
+      }
+      const resulting = after && typeof after === 'object'
+        ? after
+        : { ...bot, ...(res?.doc && typeof res.doc === 'object' ? res.doc : {}), ...(switchedTo?.name ? { strategyDetails: { name: switchedTo.name } } : {}) }
+      const view = botConfigView(resulting)
+      const warnings = serverWarnings(res)
+      const notes: string[] = []
+      if ((switchedTo || presetId !== undefined) && view.status && view.status !== 'active' && view.status !== 'debug_active') {
+        notes.push(`The bot is ${view.status}: start it with start_bot when you are ready.`)
+      }
+      return jsonResult({
+        message,
+        bot: view,
+        ...(warnings.length ? { warnings } : {}),
+        ...(notes.length ? { notes } : {}),
+      })
     }),
   )
 

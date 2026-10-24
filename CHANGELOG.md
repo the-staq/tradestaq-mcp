@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+- **`update_bot` edits the whole bot.** New fields: `name`; `strategyId` (ID or slug, resolved through the strategy route); `presetId` (ID or slug, applied by the server: the preset's strategy, parameter overrides, timeframe, execution mode / interval and version, with explicit fields on top); `versionChannel` and `pinnedVersionId`; `timeframe`; `executionMode` and `spinIntervalSeconds`; `parameterOverrides` (merged into the current ones, `null` removes a key) and `resetParameterOverrides`. Everything goes in one PATCH, so a strategy switch is never half-applied.
+- **Merge rules.** `spinConfig` is fetched and merged like `positionSizing` (only the explicit keys go with a preset, so the preset's fill the rest). Parameter overrides merge onto the bot's current ones on the same strategy; a strategy switch starts from none and also clears the old preset and pin (stable channel unless given). Size and leverage are only sent when `positionSizePercent` / `leverage` are given.
+- **Flat-only changes.** A strategy or timeframe change on a bot that holds a position (GET's `openTradesCount` / `openPosition`) is refused with `OPEN_POSITION` before anything is sent; the server's own 409 `OPEN_POSITION` (it also counts working orders) comes back with the same advice: pause with `stopAfterClose: true`, wait until flat, retry.
+- **Result.** Every edit except a `stopAfterClose`-only call now returns JSON: `message`, the resulting `bot` config read back from GET /api/bots/:id (strategy id and name, version channel and the version it runs, preset, timeframe, mode, interval, up to 40 parameter overrides, sizing, status, paper/live, open position) and the server's `warnings` (e.g. candle history supply), plus a note to `start_bot` a paused bot after a switch.
+- **Scope.** Unchanged and server-enforced: a paper bot needs `mcp:paper`, any change to a live bot `mcp:live`. An `INSUFFICIENT_SCOPE` on a live bot says so.
+- README lists `start_bot` and `delete_bot`.
+- Ship this only after the TradeStaq web release with PATCH `applyPreset` and the strategy-switch guard is live. Against an older server a `presetId` call fails with `PRESET_UNSUPPORTED` (the server ignores the field) instead of reporting success, and the client-side open-position check still blocks a switch on a holding bot.
+
 ## [0.5.0] - 2026-10-14
 
 ### Added
