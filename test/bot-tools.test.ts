@@ -1204,3 +1204,20 @@ describe('close_position', () => {
     expect(description).toContain('never call close_position again for it without checking get_positions first')
   })
 })
+
+describe('close_position: the server said nothing was sent', () => {
+  const SOL = { exchangeId: 'ex-1', exchange: 'binance', symbol: 'SOL/USDT:USDT', side: 'long', size: 2, botCount: 0 }
+  // Value: protects=a server 503 that says the close was refused before sending is shown as that (its code and message), never as "may have executed"; fails_when=every 5xx maps to CLOSE_OUTCOME_UNKNOWN; why_new=app fix(positions) 503 codes; seam=api mock; no_claim=the server's own decision
+  it.each([
+    ['CLOSE_LOCK_UNAVAILABLE', 'The close could not be started safely right now (its lock is unavailable): nothing was sent. Try again in a moment.'],
+    ['POSITION_UNREADABLE', 'TradeStaq holds no open long SOL/USDT:USDT lot on this account and the exchange position could not be read: nothing was sent. Try again in a moment.'],
+  ])('503 %s: the server\'s code and message, not CLOSE_OUTCOME_UNKNOWN', async (code, message) => {
+    mockApi
+      .mockResolvedValueOnce({ positions: [SOL] })
+      .mockRejectedValueOnce(new ApiError(503, code, message, false))
+    const result = await getToolHandler('close_position')({ exchangeId: 'ex-1', symbol: 'SOL/USDT:USDT', side: 'long', percentage: 100 })
+    expect(result.isError).toBe(true)
+    const body = JSON.parse(result.content[0].text)
+    expect(body.error).toMatchObject({ code, message, retryable: false })
+  })
+})

@@ -30,6 +30,10 @@ function noAnswerReason(err: unknown): string | undefined {
   return undefined
 }
 
+// Server answers (503) that say the close was refused before anything was sent: the
+// close lock could not be taken, or the exchange leg could not be read. Not "no answer".
+const CLOSE_NOTHING_SENT_CODES = new Set(['CLOSE_LOCK_UNAVAILABLE', 'POSITION_UNREADABLE'])
+
 // close_position errors after which the close may have executed. Each says to check
 // get_positions first and is never retryable: a blind second close_position call could close
 // the position again (50% twice is 100%; a spot resend sells coins outside the lots).
@@ -41,6 +45,8 @@ function closeMayHaveRunResult(err: unknown, position: string) {
   if (err.code === 'CLOSE_UNCONFIRMED') {
     return errorResult('CLOSE_UNCONFIRMED', `The close order for the ${position} position was sent, but its outcome could not be confirmed: it may have executed on the exchange. Check get_positions before retrying; never retry it blindly.`, { fields: { closedOnExchange: 'maybe' } })
   }
+  // The server answered that it sent nothing (its own 503s): its code and message stand.
+  if (CLOSE_NOTHING_SENT_CODES.has(err.code)) return undefined
   const reason = noAnswerReason(err)
   if (reason) {
     return errorResult('CLOSE_OUTCOME_UNKNOWN', `The close request for the ${position} position got no answer (${reason}), so the close may have executed on the exchange. Check get_positions before retrying: do not call close_position again for it until you have.`, { fields: { closedOnExchange: 'maybe' } })
