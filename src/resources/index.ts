@@ -1,5 +1,17 @@
 import { api, hasUsableToken } from '../api.js'
+import { fetchOpenPositions, fetchPortfolioSummary } from '../tools/portfolio.js'
+import { botSummary } from '../tools/bot.js'
+import { strategySummary } from '../tools/strategy.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+
+// Each resource returns exactly what its tool returns (get_portfolio + get_positions,
+// list_bots, list_strategies), through the same functions. Their own copies read fields
+// the API never sends (totalBalance, activeBots, strategyName, paperTrading, ...), so they
+// came back mostly empty while the tools were right.
+
+const json = (uri: string, body: unknown) => ({
+  contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(body, null, 2) }],
+})
 
 export function registerResources(server: McpServer) {
 
@@ -9,26 +21,17 @@ export function registerResources(server: McpServer) {
     'tradestaq://portfolio',
     { description: 'Current portfolio: balances, positions, and active bots across all exchanges.' },
     async () => {
-      if (!(await hasUsableToken())) {
-        return { contents: [{ uri: 'tradestaq://portfolio', mimeType: 'application/json', text: JSON.stringify({ error: 'Not authenticated' }) }] }
-      }
+      const uri = 'tradestaq://portfolio'
+      if (!(await hasUsableToken())) return json(uri, { error: 'Not authenticated' })
       try {
-        const data = await api<any>('/api/v1/portfolio')
-        return {
-          contents: [{
-            uri: 'tradestaq://portfolio',
-            mimeType: 'application/json',
-            text: JSON.stringify({
-              totalBalance: data.totalBalance,
-              change24h: data.change24h,
-              exchanges: data.exchanges?.map((e: any) => ({ name: e.name, platform: e.platform, balance: e.balance })),
-              positions: data.positions?.map((p: any) => ({ symbol: p.symbol, side: p.side, pnl: p.pnl, size: p.size })),
-              activeBots: data.activeBots,
-            }, null, 2),
-          }],
-        }
+        // Positions are their own endpoint; one that fails leaves the summary standing.
+        const [summary, positions] = await Promise.all([
+          fetchPortfolioSummary(),
+          fetchOpenPositions().catch((err: Error) => ({ error: err.message })),
+        ])
+        return json(uri, Array.isArray(positions) ? { ...summary, positions } : { ...summary, positions: [], positionsError: positions.error })
       } catch (err) {
-        return { contents: [{ uri: 'tradestaq://portfolio', mimeType: 'application/json', text: JSON.stringify({ error: (err as Error).message }) }] }
+        return json(uri, { error: (err as Error).message })
       }
     },
   )
@@ -39,25 +42,13 @@ export function registerResources(server: McpServer) {
     'tradestaq://bots',
     { description: 'All trading bots with current status, PnL, and strategy info.' },
     async () => {
-      if (!(await hasUsableToken())) {
-        return { contents: [{ uri: 'tradestaq://bots', mimeType: 'application/json', text: JSON.stringify({ error: 'Not authenticated' }) }] }
-      }
+      const uri = 'tradestaq://bots'
+      if (!(await hasUsableToken())) return json(uri, { error: 'Not authenticated' })
       try {
         const data = await api<any>('/api/bots')
-        const bots = data.bots || data.docs || []
-        return {
-          contents: [{
-            uri: 'tradestaq://bots',
-            mimeType: 'application/json',
-            text: JSON.stringify(bots.map((b: any) => ({
-              id: b.id || b._id, name: b.name, status: b.status,
-              strategy: b.strategyName, symbol: b.symbol,
-              exchange: b.exchangeName, isPaper: b.paperTrading, pnl: b.pnl,
-            })), null, 2),
-          }],
-        }
+        return json(uri, (data.docs || data.bots || []).map(botSummary))
       } catch (err) {
-        return { contents: [{ uri: 'tradestaq://bots', mimeType: 'application/json', text: JSON.stringify({ error: (err as Error).message }) }] }
+        return json(uri, { error: (err as Error).message })
       }
     },
   )
@@ -68,22 +59,13 @@ export function registerResources(server: McpServer) {
     'tradestaq://strategies',
     { description: 'Available trading strategies with performance metrics.' },
     async () => {
+      const uri = 'tradestaq://strategies'
       try {
-        const data = await api<any>('/api/tradedroid/strategies')
-        const strategies = data.strategies || data.docs || []
-        return {
-          contents: [{
-            uri: 'tradestaq://strategies',
-            mimeType: 'application/json',
-            text: JSON.stringify(strategies.map((s: any) => ({
-              id: s.id || s._id, name: s.name, market: s.market,
-              description: s.description?.slice(0, 150),
-              rating: s.rating, activeBots: s.activeBots,
-            })), null, 2),
-          }],
-        }
+        // The public marketplace catalog, as list_strategies returns it by default.
+        const data = await api<any>('/api/tradedroid/strategies?limit=50&marketplace=true')
+        return json(uri, (data.docs || []).map(strategySummary))
       } catch (err) {
-        return { contents: [{ uri: 'tradestaq://strategies', mimeType: 'application/json', text: JSON.stringify({ error: (err as Error).message }) }] }
+        return json(uri, { error: (err as Error).message })
       }
     },
   )

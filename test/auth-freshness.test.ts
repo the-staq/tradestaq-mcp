@@ -129,25 +129,39 @@ describe('authenticate', () => {
 })
 
 describe('resources', () => {
+  // The API's real shapes, answered by path (the portfolio resource reads three endpoints).
+  const byPath = (url: string) => {
+    const path = new URL(url).pathname
+    if (path === '/api/oauth/token') return refreshed()
+    if (path === '/api/v1/portfolio') return json({ total: 10, change24h: 0, exchanges: [] })
+    if (path === '/api/v1/positions') return json({ positions: [] })
+    if (path === '/api/bots') return json({ docs: [{ id: 'b1', name: 'Bot', status: 'active' }] })
+    return json({}, 404)
+  }
+
   it('hosted: tradestaq://portfolio and tradestaq://bots use the request bearer', async () => {
     state.current = { baseUrl: 'https://www.tradestaq.com' } // no file token on the server
-    mockFetch.mockResolvedValueOnce(json({ totalBalance: 10, exchanges: [], positions: [], activeBots: 1 }))
+    mockFetch.mockImplementation(async (url: string) => byPath(url))
     const portfolio = await requestContext.run({ token: 'bearer-x' }, () =>
       handlerOf(registerResources, 'resource', 'portfolio')(new URL('tradestaq://portfolio')),
     )
-    expect(JSON.parse(portfolio.contents[0].text)).toMatchObject({ totalBalance: 10, activeBots: 1 })
+    expect(JSON.parse(portfolio.contents[0].text)).toMatchObject({ totalBalance: 10, activeBots: 1, positions: [] })
 
-    mockFetch.mockResolvedValueOnce(json({ bots: [{ id: 'b1', name: 'Bot', status: 'active' }] }))
     const bots = await requestContext.run({ token: 'bearer-x' }, () =>
       handlerOf(registerResources, 'resource', 'bots')(new URL('tradestaq://bots')),
     )
     expect(JSON.parse(bots.contents[0].text)[0]).toMatchObject({ id: 'b1', name: 'Bot' })
+    expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(4)
     for (const call of mockFetch.mock.calls) expect(call[1].headers.Authorization).toBe('Bearer bearer-x')
   })
 
   it('stdio: an expired access token is refreshed before reading the portfolio', async () => {
-    mockFetch.mockResolvedValueOnce(refreshed()).mockResolvedValueOnce(json({ totalBalance: 5 }))
+    mockFetch.mockImplementation(async (url: string) => byPath(url))
     const res = await handlerOf(registerResources, 'resource', 'portfolio')(new URL('tradestaq://portfolio'))
-    expect(JSON.parse(res.contents[0].text)).toMatchObject({ totalBalance: 5 })
+    expect(JSON.parse(res.contents[0].text)).toMatchObject({ totalBalance: 10 })
+    // One refresh, first; every read after it carries the rotated token.
+    expect(new URL(mockFetch.mock.calls[0][0]).pathname).toBe('/api/oauth/token')
+    expect(mockFetch.mock.calls.filter((c) => new URL(c[0]).pathname === '/api/oauth/token')).toHaveLength(1)
+    for (const call of mockFetch.mock.calls.slice(1)) expect(call[1].headers.Authorization).toBe('Bearer fresh-access-token')
   })
 })

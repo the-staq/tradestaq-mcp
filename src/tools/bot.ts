@@ -313,22 +313,25 @@ function serverWarnings(res: any): string[] {
   return out
 }
 
+/** One /api/bots row as list_bots and the tradestaq://bots resource return it. */
+export function botSummary(b: any) {
+  const ex = primaryExchangeOf(b)
+  return {
+    id: b.id || b._id, name: b.name, status: b.status,
+    strategy: strategyNameOf(b), symbol: b.symbol,
+    exchange: ex?.accountLabel || ex?.name,
+    isPaper: ex ? !!ex.isPaper : undefined,
+    pnl: b.stats?.totalPnl,
+  }
+}
+
 export function registerBotTools(server: McpServer) {
 
   server.tool('list_bots', 'List all your trading bots with status and performance.', {}, withErrorHandling(async () => {
     const data = await api<any>('/api/bots')
     const bots = data.docs || data.bots || []
     if (!bots.length) return { content: [{ type: 'text' as const, text: 'No trading bots. Use deploy_bot to create one.' }] }
-    return jsonResult(bots.map((b: any) => {
-      const ex = primaryExchangeOf(b)
-      return {
-        id: b.id || b._id, name: b.name, status: b.status,
-        strategy: strategyNameOf(b), symbol: b.symbol,
-        exchange: ex?.accountLabel || ex?.name,
-        isPaper: ex ? !!ex.isPaper : undefined,
-        pnl: b.stats?.totalPnl,
-      }
-    }))
+    return jsonResult(bots.map(botSummary))
   }))
 
   server.tool('get_bot_status', 'Get detailed status, configuration, and live performance for a specific trading bot by ID. Returns its run status, the strategy/symbol/exchange it trades, whether it is paper or live, P&L, win rate, total trades, risk config (leverage, stop-loss, take-profit, position size) and, for a strategy bot, strategyConfig (version channel and the version it runs, preset, timeframe, execution mode, interval, parameter overrides: what update_bot can change). Use it to check how a deployed bot is doing. stopAfterClose.enabled = true means the bot will pause itself once its current position closes (set with update_bot); completedAt is when it last did. Read-only — to stop a bot use stop_bot or update_bot stopAfterClose. Get bot IDs from list_bots.', {
