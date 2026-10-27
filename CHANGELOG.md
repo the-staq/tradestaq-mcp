@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-27
+
 ### Fixed
 - **`check_auth` no longer says "Not authenticated" after an idle night.** It judged the stored access token by its expiry alone, while every other tool refreshes it first; once the one-hour token had expired, `check_auth` (the tool agents are told to call first) reported no session although the 30-day refresh token was good. It now refreshes first, exactly as the other tools do. `authenticate` likewise no longer starts a new browser flow for a session that only needed a refresh.
 - **Hosted: the `tradestaq://portfolio` and `tradestaq://bots` resources work.** They checked the server's own config file instead of the request's bearer, so on mcp.tradestaq.com they always answered "Not authenticated".
