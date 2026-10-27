@@ -2,8 +2,8 @@ import { z } from 'zod'
 import http from 'node:http'
 import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { loadConfig, saveConfig, clearToken, isAuthenticated } from '../config.js'
-import { api, ApiError } from '../api.js'
+import { loadConfig, saveConfig, clearToken } from '../config.js'
+import { api, ApiError, hasUsableToken } from '../api.js'
 import { getRequestStore } from '../request-context.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
@@ -118,7 +118,7 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
         }
       }
 
-      if (isAuthenticated()) {
+      if (await hasUsableToken()) {
         // isError:true so MCP agents treat this as a branch that needs
         // follow-up rather than a success. Otherwise an LLM trying to
         // upgrade scope sees "Already authenticated" as completion and
@@ -324,7 +324,7 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
     {},
     async () => {
       const store = getRequestStore()
-      const authed = store ? !!store.token : isAuthenticated()
+      const authed = await hasUsableToken()
       if (!authed) {
         return { content: [{ type: 'text' as const, text: store
           ? 'Not authenticated. This hosted TradeStaq MCP server expects a bearer token from your client connector — authorize the TradeStaq connector (OAuth) so it attaches one per request.'

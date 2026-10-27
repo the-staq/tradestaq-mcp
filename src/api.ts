@@ -1,4 +1,4 @@
-import { loadConfig, saveConfig } from './config.js'
+import { loadConfig, saveConfig, isAuthenticated } from './config.js'
 import { requestContext } from './request-context.js'
 
 export class ApiError extends Error {
@@ -40,13 +40,29 @@ function sleep(ms: number): Promise<void> {
 // Exchange the stored refresh token for a fresh access+refresh pair (OAuth 2.1
 // rotation, RFC 9700). stdio-only — hosted sessions never touch the shared file
 // token. Returns true when the config was updated with a new access token.
-async function oauthRefresh(): Promise<boolean> {
+//
+// Single-flight: concurrent callers (the client runs tool calls in parallel, e.g.
+// check_auth beside list_bots) share one refresh. Two refreshes would send the same
+// refresh token twice; the server treats a reuse as theft and revokes the whole
+// family, and the loser's invalid_grant then cleared the winner's new tokens.
+let refreshInFlight: Promise<boolean> | null = null
+function oauthRefresh(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = oauthRefreshOnce().finally(() => {
+      refreshInFlight = null
+    })
+  }
+  return refreshInFlight
+}
+
+async function oauthRefreshOnce(): Promise<boolean> {
   const config = loadConfig()
   if (!config.refreshToken || !config.oauthClientId) return false
+  const sentRefreshToken = config.refreshToken
   try {
     const body = new URLSearchParams({
       grant_type: 'refresh_token',
-      refresh_token: config.refreshToken,
+      refresh_token: sentRefreshToken,
       client_id: config.oauthClientId,
     })
     const res = await fetch(`${config.baseUrl}/api/oauth/token`, {
@@ -58,9 +74,13 @@ async function oauthRefresh(): Promise<boolean> {
       // invalid_grant → the refresh token is expired, revoked, or reuse-detected.
       // Clear stored tokens so the next call cleanly prompts re-authentication
       // instead of retrying a dead token forever.
+      // Only while the stored refresh token is still the one refused: if another refresh
+      // (another process sharing this config) rotated it meanwhile, those tokens are good.
       if (res.status === 400 || res.status === 401) {
         const c = loadConfig()
-        saveConfig({ ...c, token: undefined, tokenExpiresAt: undefined, refreshToken: undefined, refreshExpiresAt: undefined })
+        if (c.refreshToken === sentRefreshToken) {
+          saveConfig({ ...c, token: undefined, tokenExpiresAt: undefined, refreshToken: undefined, refreshExpiresAt: undefined })
+        }
       }
       return false
     }
@@ -129,6 +149,20 @@ async function refreshTokenIfNeeded(): Promise<void> {
   } catch {
     // Silently continue — token refresh is best-effort
   }
+}
+
+/**
+ * Whether a call can be made right now, judged the way api() makes one. Hosted: this
+ * request carries a bearer (the shared file token is never consulted). Stdio: the stored
+ * token after the same proactive refresh api() does first, so an access token that expired
+ * overnight while its refresh token is still good is rotated here, instead of reading as
+ * "not authenticated" while every other tool goes on working.
+ */
+export async function hasUsableToken(): Promise<boolean> {
+  const store = requestContext.getStore()
+  if (store) return !!store.token
+  await refreshTokenIfNeeded()
+  return isAuthenticated()
 }
 
 // Parse a Retry-After header (integer seconds form) into milliseconds, capped.

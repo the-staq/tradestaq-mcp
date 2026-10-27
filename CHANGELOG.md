@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`check_auth` no longer says "Not authenticated" after an idle night.** It judged the stored access token by its expiry alone, while every other tool refreshes it first; once the one-hour token had expired, `check_auth` (the tool agents are told to call first) reported no session although the 30-day refresh token was good. It now refreshes first, exactly as the other tools do. `authenticate` likewise no longer starts a new browser flow for a session that only needed a refresh.
+- **Hosted: the `tradestaq://portfolio` and `tradestaq://bots` resources work.** They checked the server's own config file instead of the request's bearer, so on mcp.tradestaq.com they always answered "Not authenticated".
+- **Parallel tool calls no longer sign you out.** When the access token had expired, two calls at once (say `check_auth` beside `list_bots`) each sent the same refresh token; the server treats a reused refresh token as theft and revokes the whole session, so the next call needed a new browser sign-in. Concurrent callers now share one refresh, and a refused refresh only clears the stored tokens if they are still the ones it sent.
+
+### Changed
+- **Publishing needs a maintainer's approval.** The publish job runs in the GitHub `npm` environment: a required reviewer, no admin bypass, v* tags only. npm's trusted publisher names that environment, so a tag pushed with an edited workflow cannot publish.
+- **Releases update the official MCP Registry.** After npm, `mcp-publisher` (pinned, its signature checked with cosign) signs in with GitHub OIDC and publishes `server.json`. The listing had been on 0.1.1. `npm version` keeps `server.json` on the released version (`scripts/sync-server-json.mjs`), and the workflow refuses a tag that doesn't match it.
+- `npm version` files the `[Unreleased]` notes under the new version's heading (`scripts/stamp-changelog.mjs`). The 0.6.1 notes, left under `[Unreleased]` by its release, now sit under `[0.6.1]`.
+
+## [0.6.1] - 2026-10-27
+
 ### Security
 - **Dependencies updated; `npm audit` reports nothing.** The MCP SDK goes to 1.32.2: one HTTP request within the default size limit could exhaust the hosted server's memory (GHSA-46jr-4wx8-v453), plus three SDK advisories in code this server doesn't use. zod goes to 4 (memory exhaustion validating oversized constrained collections; no zod 3 fix exists). The SDK's own dependencies move to patched versions: hono, @hono/node-server, fast-uri, proxy-addr, qs, ip-address, body-parser. vitest goes to 5 (test tooling only).
 - **Node 20 or newer** is now required (`engines`), for `@hono/node-server` 2. Node 18 is end of life.

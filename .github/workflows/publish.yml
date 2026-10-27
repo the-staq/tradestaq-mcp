@@ -1,30 +1,37 @@
-name: Publish to npm
+name: Publish
 
-# Publishes the package when a version tag is pushed (`npm run release:*` pushes one).
+# A pushed version tag (`npm run release:*` pushes one) publishes the package to npm, then
+# updates its listing on the official MCP Registry.
 #
-# Trusted publishing (OIDC): npm accepts this workflow's own GitHub identity, so no npm
-# token is stored anywhere and nothing expires. The package's trusted publisher on
-# npmjs.com must name this repository and this file (publish.yml). npm adds a provenance
-# statement automatically (public repository). Needs npm >= 11.5.1, hence Node 24.
+# npm: trusted publishing (OIDC). npm accepts this workflow's own GitHub identity, so no npm
+# token is stored anywhere and nothing expires; provenance is added automatically (public
+# repository). The job runs in the `npm` environment, which waits for the owner's approval
+# and only admits v* tags, and npm's trusted publisher names that environment, so a
+# workflow edited to skip the approval cannot publish. Needs npm >= 11.5.1, hence Node 24.
+#
+# MCP Registry: mcp-publisher, pinned and signature-checked, signs in with the same GitHub
+# OIDC identity (namespace io.github.the-staq). It runs only after npm has the version,
+# because the registry checks the npm package's `mcpName`.
 on:
   push:
     tags: ['v*']
 
 permissions:
   contents: read
-  id-token: write # OIDC token npm exchanges for a one-time publish credential
+  id-token: write # OIDC: npm and the MCP Registry exchange it for a one-time credential
 
 concurrency:
-  group: npm-publish
+  group: publish
   cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: npm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -34,13 +41,21 @@ jobs:
           npm --version
           node -e "const [a,b,c]=process.argv[1].split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm '+process.argv[1]+' is older than 11.5.1'); process.exit(1) }" "$(npm --version)"
 
-      - name: Tag matches package.json
+      - name: Tag matches package.json and server.json
         run: |
           expected="v$(node -p "require('./package.json').version")"
           if [ "$GITHUB_REF_NAME" != "$expected" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not match package.json version ($expected)"
             exit 1
           fi
+          # The same entries scripts/sync-server-json.mjs keeps in step: the server, and its
+          # npm package of this name (another package type would not block a release).
+          node -e "
+            const { name, version: v } = require('./package.json'), s = require('./server.json')
+            const ours = (s.packages || []).filter((p) => p.registryType === 'npm' && p.identifier === name)
+            const bad = [s.version, ...ours.map((p) => p.version)].filter((x) => x !== v)
+            if (!ours.length || bad.length) { console.error('server.json is not on ' + v + ': ' + (bad.join(', ') || 'no npm package ' + name)); process.exit(1) }
+          "
 
       - run: npm ci
 
@@ -51,5 +66,51 @@ jobs:
         run: npx vitest run
 
       # prepublishOnly builds dist/ first.
-      - name: Publish
+      - name: Publish to npm
         run: npm publish --access public
+
+  mcp-registry:
+    needs: publish
+    runs-on: ubuntu-latest
+    env:
+      # Bump both together, deliberately; never the mutable releases/latest URL. The SHA is
+      # the commit the release tag pointed at, checked in the signing certificate, so a
+      # moved tag cannot substitute a different build.
+      MCP_PUBLISHER_VERSION: v1.8.1
+      MCP_PUBLISHER_SHA: f52dc8525a441a3abf5fedc9912152d95af5aab1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          arch="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+          archive="mcp-publisher_${os}_${arch}.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-github-workflow-sha "${MCP_PUBLISHER_SHA}" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+
+      - name: Sign in to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      # The registry reads the version from npm, which can take a minute to serve a new one.
+      - name: Publish to the MCP Registry
+        run: |
+          for attempt in 1 2 3 4 5; do
+            ./mcp-publisher publish && exit 0
+            echo "attempt $attempt failed; retrying in 30s"
+            sleep 30
+          done
+          exit 1
