@@ -1,0 +1,55 @@
+name: Publish to npm
+
+# Publishes the package when a version tag is pushed (`npm run release:*` pushes one).
+#
+# Trusted publishing (OIDC): npm accepts this workflow's own GitHub identity, so no npm
+# token is stored anywhere and nothing expires. The package's trusted publisher on
+# npmjs.com must name this repository and this file (publish.yml). npm adds a provenance
+# statement automatically (public repository). Needs npm >= 11.5.1, hence Node 24.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write # OIDC token npm exchanges for a one-time publish credential
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: npm supports trusted publishing
+        run: |
+          npm --version
+          node -e "const [a,b,c]=process.argv[1].split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm '+process.argv[1]+' is older than 11.5.1'); process.exit(1) }" "$(npm --version)"
+
+      - name: Tag matches package.json
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version ($expected)"
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npx vitest run
+
+      # prepublishOnly builds dist/ first.
+      - name: Publish
+        run: npm publish --access public
