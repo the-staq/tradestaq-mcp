@@ -1,4 +1,4 @@
-import { loadConfig, saveConfig } from './config.js'
+import { loadConfig, saveConfig, isAuthenticated } from './config.js'
 import { requestContext } from './request-context.js'
 
 export class ApiError extends Error {
@@ -129,6 +129,20 @@ async function refreshTokenIfNeeded(): Promise<void> {
   } catch {
     // Silently continue — token refresh is best-effort
   }
+}
+
+/**
+ * Whether a call can be made right now, judged the way api() makes one. Hosted: this
+ * request carries a bearer (the shared file token is never consulted). Stdio: the stored
+ * token after the same proactive refresh api() does first, so an access token that expired
+ * overnight while its refresh token is still good is rotated here, instead of reading as
+ * "not authenticated" while every other tool goes on working.
+ */
+export async function hasUsableToken(): Promise<boolean> {
+  const store = requestContext.getStore()
+  if (store) return !!store.token
+  await refreshTokenIfNeeded()
+  return isAuthenticated()
 }
 
 // Parse a Retry-After header (integer seconds form) into milliseconds, capped.

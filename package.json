@@ -22,7 +22,7 @@
     "test": "vitest run",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build",
-    "version": "echo $npm_package_version > VERSION && git add VERSION",
+    "version": "echo $npm_package_version > VERSION && node scripts/stamp-changelog.mjs && git add VERSION CHANGELOG.md",
     "release:patch": "npm version patch && git push && git push --tags",
     "release:minor": "npm version minor && git push && git push --tags",
     "release:major": "npm version major && git push && git push --tags"

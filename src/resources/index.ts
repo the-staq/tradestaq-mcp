@@ -1,5 +1,4 @@
-import { api } from '../api.js'
-import { isAuthenticated } from '../config.js'
+import { api, hasUsableToken } from '../api.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 export function registerResources(server: McpServer) {
@@ -10,7 +9,7 @@ export function registerResources(server: McpServer) {
     'tradestaq://portfolio',
     { description: 'Current portfolio: balances, positions, and active bots across all exchanges.' },
     async () => {
-      if (!isAuthenticated()) {
+      if (!(await hasUsableToken())) {
         return { contents: [{ uri: 'tradestaq://portfolio', mimeType: 'application/json', text: JSON.stringify({ error: 'Not authenticated' }) }] }
       }
       try {
@@ -40,7 +39,7 @@ export function registerResources(server: McpServer) {
     'tradestaq://bots',
     { description: 'All trading bots with current status, PnL, and strategy info.' },
     async () => {
-      if (!isAuthenticated()) {
+      if (!(await hasUsableToken())) {
         return { contents: [{ uri: 'tradestaq://bots', mimeType: 'application/json', text: JSON.stringify({ error: 'Not authenticated' }) }] }
       }
       try {
