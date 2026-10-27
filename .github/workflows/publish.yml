@@ -29,9 +29,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: npm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -48,10 +48,13 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match package.json version ($expected)"
             exit 1
           fi
+          # The same entries scripts/sync-server-json.mjs keeps in step: the server, and its
+          # npm package of this name (another package type would not block a release).
           node -e "
-            const v = require('./package.json').version, s = require('./server.json')
-            const bad = [s.version, ...(s.packages || []).map((p) => p.version)].filter((x) => x !== v)
-            if (bad.length) { console.error('server.json is not on ' + v + ': ' + bad.join(', ')); process.exit(1) }
+            const { name, version: v } = require('./package.json'), s = require('./server.json')
+            const ours = (s.packages || []).filter((p) => p.registryType === 'npm' && p.identifier === name)
+            const bad = [s.version, ...ours.map((p) => p.version)].filter((x) => x !== v)
+            if (!ours.length || bad.length) { console.error('server.json is not on ' + v + ': ' + (bad.join(', ') || 'no npm package ' + name)); process.exit(1) }
           "
 
       - run: npm ci
@@ -70,10 +73,13 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     env:
-      # Bump deliberately; never the mutable releases/latest URL.
+      # Bump both together, deliberately; never the mutable releases/latest URL. The SHA is
+      # the commit the release tag pointed at, checked in the signing certificate, so a
+      # moved tag cannot substitute a different build.
       MCP_PUBLISHER_VERSION: v1.8.1
+      MCP_PUBLISHER_SHA: f52dc8525a441a3abf5fedc9912152d95af5aab1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -91,6 +97,7 @@ jobs:
             --bundle "$archive.sigstore.json" \
             --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-github-workflow-sha "${MCP_PUBLISHER_SHA}" \
             "$archive"
           tar xzf "$archive" mcp-publisher
           rm -f "$archive" "$archive.sigstore.json"
@@ -98,5 +105,12 @@ jobs:
       - name: Sign in to the MCP Registry
         run: ./mcp-publisher login github-oidc
 
+      # The registry reads the version from npm, which can take a minute to serve a new one.
       - name: Publish to the MCP Registry
-        run: ./mcp-publisher publish
+        run: |
+          for attempt in 1 2 3 4 5; do
+            ./mcp-publisher publish && exit 0
+            echo "attempt $attempt failed; retrying in 30s"
+            sleep 30
+          done
+          exit 1
