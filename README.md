@@ -237,10 +237,17 @@ npm run start:http # run server (HTTP+SSE on port 3100)
 npm run release:patch   # or release:minor / release:major
 ```
 
-This bumps the version, commits, tags `vX.Y.Z` and pushes. The tag triggers
-`.github/workflows/publish.yml`, which type-checks, tests and publishes to npm through
-trusted publishing (no npm token anywhere), with provenance. Then run the **Deploy MCP**
-workflow to update the hosted server at mcp.tradestaq.com.
+This bumps the version (and the `server.json` versions), files the CHANGELOG's
+`[Unreleased]` notes under it, commits, tags `vX.Y.Z` and pushes. The tag triggers
+`.github/workflows/publish.yml`:
+
+1. **Approve the run.** The publish job waits in the `npm` environment for a maintainer's
+   approval (Actions, then the run, then *Review deployments*).
+2. It type-checks, tests and publishes to npm through trusted publishing (no npm token
+   anywhere), with provenance.
+3. It updates the listing on the official MCP Registry.
+
+Then run the **Deploy MCP** workflow to update the hosted server at mcp.tradestaq.com.
 
 ## Error Handling
 

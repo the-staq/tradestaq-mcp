@@ -8,6 +8,8 @@
 - **Parallel tool calls no longer sign you out.** When the access token had expired, two calls at once (say `check_auth` beside `list_bots`) each sent the same refresh token; the server treats a reused refresh token as theft and revokes the whole session, so the next call needed a new browser sign-in. Concurrent callers now share one refresh, and a refused refresh only clears the stored tokens if they are still the ones it sent.
 
 ### Changed
+- **Publishing needs a maintainer's approval.** The publish job runs in the GitHub `npm` environment: a required reviewer, no admin bypass, v* tags only. npm's trusted publisher names that environment, so a tag pushed with an edited workflow cannot publish.
+- **Releases update the official MCP Registry.** After npm, `mcp-publisher` (pinned, its signature checked with cosign) signs in with GitHub OIDC and publishes `server.json`. The listing had been on 0.1.1. `npm version` keeps `server.json` on the released version (`scripts/sync-server-json.mjs`), and the workflow refuses a tag that doesn't match it.
 - `npm version` files the `[Unreleased]` notes under the new version's heading (`scripts/stamp-changelog.mjs`). The 0.6.1 notes, left under `[Unreleased]` by its release, now sit under `[0.6.1]`.
 
 ## [0.6.1] - 2026-10-27
