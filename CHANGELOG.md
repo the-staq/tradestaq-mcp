@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Security
+- **Dependencies updated; `npm audit` reports nothing.** The MCP SDK goes to 1.32.2: one HTTP request within the default size limit could exhaust the hosted server's memory (GHSA-46jr-4wx8-v453), plus three SDK advisories in code this server doesn't use. zod goes to 4 (memory exhaustion validating oversized constrained collections; no zod 3 fix exists). The SDK's own dependencies move to patched versions: hono, @hono/node-server, fast-uri, proxy-addr, qs, ip-address, body-parser. vitest goes to 5 (test tooling only).
+- **Node 20 or newer** is now required (`engines`), for `@hono/node-server` 2. Node 18 is end of life.
+- Tool input schemas no longer list `additionalProperties: false` (zod 4's JSON Schema). Unknown arguments are still dropped, as before.
+
 ### Changed
 - **Releases publish from GitHub Actions.** Pushing a `vX.Y.Z` tag (what `npm run release:*` does) runs `.github/workflows/publish.yml`: it checks the tag matches `package.json`, type-checks, tests, builds and publishes through npm trusted publishing (OIDC). No npm token is stored on a laptop or in the repo, so a release can no longer fail on an expired one (0.4.x and 0.5.0 never reached npm that way), and every version carries a provenance statement. The `release:*` scripts no longer run `npm publish` themselves.
 - `repository.url` uses npm's canonical `git+https://` form, which trusted publishing matches against the repository.
