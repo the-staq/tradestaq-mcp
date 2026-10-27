@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **The `tradestaq://portfolio`, `tradestaq://bots` and `tradestaq://strategies` resources return real data.** They kept their own field mappings after the tools were fixed, so they read fields the API never sends. The portfolio came back with only its 24h change and exchanges (no total balance, positions or active bots), and every bot without its strategy, exchange, paper/live flag or PnL. Each resource now goes through the same function as its tool (`get_portfolio` + `get_positions`, `list_bots`, `list_strategies` on the marketplace catalog), so the two can't drift apart again. A failed positions read leaves the rest of the portfolio standing, with `positionsError`.
+
 ## [0.6.2] - 2026-10-27
 
 ### Fixed

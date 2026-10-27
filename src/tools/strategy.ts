@@ -3,6 +3,14 @@ import { api, ApiError } from '../api.js'
 import { jsonResult, withErrorHandling } from '../helpers.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
+/** One strategy as list_strategies and the tradestaq://strategies resource return it. */
+export function strategySummary(s: any) {
+  return {
+    id: s.id || s._id, name: s.name, description: s.description?.slice(0, 200),
+    market: s.market, timeframe: s.timeframe, price: s.price, rating: s.rating,
+  }
+}
+
 export function registerStrategyTools(server: McpServer) {
 
   server.tool('list_strategies', 'List available trading strategies — either the public marketplace or the user\'s own library. Supports filtering and sorting. Use it to discover strategies to backtest or deploy, or to find strategy IDs for get_strategy, compare_strategies, and deploy_bot. Read-only.', {
@@ -34,8 +42,7 @@ export function registerStrategyTools(server: McpServer) {
     // `strategies` — that key was a bug, always producing an empty list.
     const strategies = data.data || data.docs || []
     return jsonResult(strategies.map((s: any) => ({
-      id: s.id || s._id, name: s.name, description: s.description?.slice(0, 200),
-      market: s.market, timeframe: s.timeframe, price: s.price, rating: s.rating,
+      ...strategySummary(s),
       ...(owned ? { status: s.status, category: s.category } : {}),
     })))
   }))
