@@ -23,9 +23,9 @@
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build",
     "version": "echo $npm_package_version > VERSION && git add VERSION",
-    "release:patch": "npm version patch && git push && git push --tags && npm publish --access public",
-    "release:minor": "npm version minor && git push && git push --tags && npm publish --access public",
-    "release:major": "npm version major && git push && git push --tags && npm publish --access public"
+    "release:patch": "npm version patch && git push && git push --tags",
+    "release:minor": "npm version minor && git push && git push --tags",
+    "release:major": "npm version major && git push && git push --tags"
   },
   "keywords": [
     "mcp",
@@ -55,7 +55,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/the-staq/tradestaq-mcp.git"
+    "url": "git+https://github.com/the-staq/tradestaq-mcp.git"
   },
   "homepage": "https://tradestaq.com",
   "author": "TradeStaq <hello@tradestaq.com>",

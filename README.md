@@ -231,6 +231,17 @@ npm start          # run server (stdio)
 npm run start:http # run server (HTTP+SSE on port 3100)
 ```
 
+### Releasing
+
+```sh
+npm run release:patch   # or release:minor / release:major
+```
+
+This bumps the version, commits, tags `vX.Y.Z` and pushes. The tag triggers
+`.github/workflows/publish.yml`, which type-checks, tests and publishes to npm through
+trusted publishing (no npm token anywhere), with provenance. Then run the **Deploy MCP**
+workflow to update the hosted server at mcp.tradestaq.com.
+
 ## Error Handling
 
 All tool errors return structured responses:

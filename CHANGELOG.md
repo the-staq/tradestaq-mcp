@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+- **Releases publish from GitHub Actions.** Pushing a `vX.Y.Z` tag (what `npm run release:*` does) runs `.github/workflows/publish.yml`: it checks the tag matches `package.json`, type-checks, tests, builds and publishes through npm trusted publishing (OIDC). No npm token is stored on a laptop or in the repo, so a release can no longer fail on an expired one (0.4.x and 0.5.0 never reached npm that way), and every version carries a provenance statement. The `release:*` scripts no longer run `npm publish` themselves.
+- `repository.url` uses npm's canonical `git+https://` form, which trusted publishing matches against the repository.
+
+## [0.6.0] - 2026-10-27
+
 ### Added
 - **`update_bot` edits the whole bot.** New fields: `name`; `strategyId` (ID or slug, resolved through the strategy route); `presetId` (ID or slug, applied by the server: the preset's strategy, parameter overrides, timeframe, execution mode / interval and version, with explicit fields on top); `versionChannel` and `pinnedVersionId`; `timeframe`; `executionMode` and `spinIntervalSeconds`; `parameterOverrides` (merged into the current ones, `null` removes a key) and `resetParameterOverrides`. Everything goes in one PATCH, so a strategy switch is never half-applied.
 - **Merge rules.** `spinConfig` is fetched and merged like `positionSizing` (only the explicit keys go with a preset, so the preset's fill the rest). Parameter overrides merge onto the bot's current ones on the same strategy; a strategy switch starts from none and also clears the old preset and pin (stable channel unless given). Size and leverage are only sent when `positionSizePercent` / `leverage` are given.
