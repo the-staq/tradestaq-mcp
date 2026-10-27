@@ -71,6 +71,32 @@ describe('hasUsableToken', () => {
     expect(await hasUsableToken()).toBe(false)
   })
 
+  it('concurrent callers share one refresh (a second would reuse the token and revoke the family)', async () => {
+    let release!: () => void
+    mockFetch.mockImplementationOnce(() => new Promise((r) => { release = () => r(refreshed()) }))
+    const both = Promise.all([hasUsableToken(), hasUsableToken()])
+    await new Promise((r) => setTimeout(r, 0))
+    release()
+    expect(await both).toEqual([true, true])
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+    expect(state.current.refreshToken).toBe('tsr_rotated')
+  })
+
+  it('a refused refresh does not clear tokens that were rotated meanwhile', async () => {
+    mockFetch.mockImplementationOnce(async () => {
+      // Another process sharing the config rotated it while this refresh was in flight.
+      state.current = { ...state.current, token: 'other-process-token', tokenExpiresAt: Date.now() + 3600e3, refreshToken: 'tsr_other' }
+      return json({ error: 'invalid_grant' }, 400)
+    })
+    expect(await hasUsableToken()).toBe(true)
+    expect(state.current).toMatchObject({ token: 'other-process-token', refreshToken: 'tsr_other' })
+  })
+
+  it('hosted: a request without a bearer is not authenticated by a valid file token', async () => {
+    state.current = { baseUrl: 'https://www.tradestaq.com', token: 'valid-file-token-xyz', tokenExpiresAt: Date.now() + 3600e3 }
+    expect(await requestContext.run({ token: undefined as any }, () => hasUsableToken())).toBe(false)
+  })
+
   it('hosted: the request bearer decides; the file token is never refreshed or read', async () => {
     expect(await requestContext.run({ token: 'bearer-x' }, () => hasUsableToken())).toBe(true)
     expect(await requestContext.run({ token: undefined as any }, () => hasUsableToken())).toBe(false)
