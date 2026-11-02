@@ -4,6 +4,9 @@ import { api } from '../api.js'
 import { jsonResult, withErrorHandling } from '../helpers.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
+// An exchange account ID (a MongoDB ObjectId), as list_exchanges returns it.
+const OBJECT_ID = /^[a-f0-9]{24}$/i
+
 async function defaultExchangeId(): Promise<string> {
   try {
     const data = await api<any>('/api/exchanges')
@@ -21,10 +24,17 @@ export function registerMarketTools(server: McpServer) {
 
   server.tool('get_price', 'Get the current price of a trading pair, along with its 24h change and volume, from a connected exchange. Use it for a quick spot-price check or to confirm the market before sizing or placing a trade. Read-only — never places orders. For historical OHLCV data use get_candles.', {
     symbol: z.string().describe('Trading pair in BASE/QUOTE format, e.g. "BTC/USDT" or "ETH/USDT".'),
-    exchange: z.string().optional().describe('Optional exchange account ID or platform name (e.g. "binance", "bybit") to price from. Omit to use the default connected exchange.'),
+    exchange: z.string().optional().describe('Optional exchange to price from: an exchange account ID from list_exchanges, or a platform name as list_exchanges shows it (e.g. "binance", "bybit"). Omit to use the default connected exchange.'),
   }, { title: 'Get Price', readOnlyHint: true, openWorldHint: true }, withErrorHandling(async ({ symbol, exchange }) => {
+    // The route resolves an account only through `exchangeId`; `exchange` must
+    // be a platform slug its exchange registry lists (e.g. "binance"). So an
+    // account ID (a 24-hex ObjectId) goes as `exchangeId` and anything else as
+    // a lowercased platform name.
     const params = new URLSearchParams({ symbol })
-    if (exchange) params.set('exchange', exchange)
+    if (exchange) {
+      if (OBJECT_ID.test(exchange)) params.set('exchangeId', exchange)
+      else params.set('exchange', exchange.toLowerCase())
+    }
     const data = await api<any>(`/api/trading/price?${params}`)
     return jsonResult({ symbol: data.symbol, price: data.price, change24h: data.change24h, volume24h: data.volume24h })
   }))
