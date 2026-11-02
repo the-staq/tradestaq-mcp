@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`get_price` prices from the exchange account you name.** Its `exchange` parameter took an account ID or a platform name but always sent it as `exchange`, which the price route reads only as a platform slug; an account ID from `list_exchanges` was never resolved. An account ID (a 24-hex ObjectId) now goes as `exchangeId` and a platform name as a lowercased `exchange`. Omitting it still uses the default connected exchange.
+
 ## [0.6.3] - 2026-10-27
 
 ### Fixed
