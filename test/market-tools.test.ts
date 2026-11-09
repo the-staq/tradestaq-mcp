@@ -99,6 +99,66 @@ describe('create_paper_exchange', () => {
   })
 })
 
+describe('get_price', () => {
+  const PRICE_RESPONSE = { symbol: 'BTC/USDT', price: 100, change24h: 1.5, volume24h: 1000 }
+
+  async function priceUrl(args: { symbol: string, exchange?: string }) {
+    mockApi.mockResolvedValue(PRICE_RESPONSE)
+    await getToolHandler('get_price')(args)
+    expect(mockApi).toHaveBeenCalledTimes(1)
+    return new URL(mockApi.mock.calls[0][0] as string, 'http://x')
+  }
+
+  it('sends an account ID from list_exchanges as exchangeId (the route resolves accounts only through it)', async () => {
+    const url = await priceUrl({ symbol: 'BTC/USDT', exchange: '6512ab34cd56ef7890abcdef' })
+
+    expect(url.pathname).toBe('/api/trading/price')
+    expect(url.searchParams.get('exchangeId')).toBe('6512ab34cd56ef7890abcdef')
+    expect(url.searchParams.has('exchange')).toBe(false)
+  })
+
+  it('treats an upper-case ObjectId as an account ID too', async () => {
+    const url = await priceUrl({ symbol: 'BTC/USDT', exchange: '6512AB34CD56EF7890ABCDEF' })
+
+    expect(url.searchParams.get('exchangeId')).toBe('6512AB34CD56EF7890ABCDEF')
+    expect(url.searchParams.has('exchange')).toBe(false)
+  })
+
+  it('sends a platform name as a lowercased exchange slug', async () => {
+    const url = await priceUrl({ symbol: 'BTC/USDT', exchange: 'Bybit' })
+
+    expect(url.searchParams.get('exchange')).toBe('bybit')
+    expect(url.searchParams.has('exchangeId')).toBe(false)
+  })
+
+  it('does not mistake a non-ObjectId string (wrong length or non-hex) for an account ID', async () => {
+    const short = await priceUrl({ symbol: 'BTC/USDT', exchange: 'abcdef1234' })
+    expect(short.searchParams.get('exchange')).toBe('abcdef1234')
+    expect(short.searchParams.has('exchangeId')).toBe(false)
+
+    vi.clearAllMocks()
+    const nonHex = await priceUrl({ symbol: 'BTC/USDT', exchange: 'kucoinfutures-zzzzzzzzzz' })
+    expect(nonHex.searchParams.get('exchange')).toBe('kucoinfutures-zzzzzzzzzz')
+    expect(nonHex.searchParams.has('exchangeId')).toBe(false)
+  })
+
+  it('sends neither param when no exchange is given, leaving the default to the route', async () => {
+    const url = await priceUrl({ symbol: 'BTC/USDT' })
+
+    expect(url.searchParams.get('symbol')).toBe('BTC/USDT')
+    expect(url.searchParams.has('exchange')).toBe(false)
+    expect(url.searchParams.has('exchangeId')).toBe(false)
+  })
+
+  it('returns symbol, price, change24h and volume24h', async () => {
+    mockApi.mockResolvedValue({ ...PRICE_RESPONSE, extra: 'dropped' })
+
+    const result = await getToolHandler('get_price')({ symbol: 'BTC/USDT', exchange: 'binance' })
+
+    expect(JSON.parse(await textOf(result))).toEqual(PRICE_RESPONSE)
+  })
+})
+
 describe('get_candles', () => {
   // Production response shape of GET /api/charts/candles (src/app/api/charts/candles/route.ts).
   const CANDLES_RESPONSE = {
