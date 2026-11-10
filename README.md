@@ -150,7 +150,7 @@ Credentials never enter the chat when using the browser flow. Token is stored lo
 | `delete_bot` | Delete a bot (refused while it has an open trade) |
 | `close_position` | Close an open position (full or partial) |
 
-`deploy_bot` defaults to paper trading. Pass `live: true` for real money. The bot trades on the strategy's own timeframe; pass `timeframe` (e.g. `4h`) only to override it. Leave out `name` and the server names the bot.
+`deploy_bot` defaults to paper trading. Pass `live: true` for real money. The bot trades on the strategy's own timeframe; pass `timeframe` (e.g. `4h`) only to override it. Leave out `name` and the server names the bot. The bot starts trading as soon as it is created, so give it its settings in the same call: `presetId` (a preset's ID or slug, of the same strategy), `parameterOverrides` and `executionMode`; the server applies them in the create itself (with a preset the bot is created paused, then started). `strategyId` takes an ID or a slug. `start: false` creates it paused for `start_bot`.
 
 `update_bot` sends everything you pass in one update, after merging it onto the bot's current settings (position sizing, spin settings and parameter overrides are never wiped by a partial change). Size and leverage change only when you pass them. `strategyId` and `presetId` take an ID or a slug (`trade-wind`, `trade-wind-long-short`). A strategy or timeframe change needs the bot to be flat: pause it with `stopAfterClose: true` first, wait until `get_bot_status` shows no open position, then switch, then `start_bot`. A live bot needs the `mcp:live` scope for any change; a paper bot `mcp:paper`. The reply is the resulting config (strategy, version, timeframe, mode, overrides, size, leverage, status) plus server warnings.
 

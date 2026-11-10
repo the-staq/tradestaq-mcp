@@ -187,6 +187,8 @@ const OBJECT_ID_RE = /^[0-9a-f]{24}$/i
 const VERSION_CHANNELS = ['stable', 'beta', 'latest', 'custom'] as const
 const EXECUTION_MODES = ['on_bar_close', 'continuous'] as const
 // Strategy parameter names as strategies declare them (e.g. ENABLE_SHORTS, rsiPeriod).
+/** A preset id or slug, the shape the server accepts (mfanya-client bot-write-fields applyPreset). */
+const PRESET_REF_RE = /^[A-Za-z0-9_-]{1,100}$/
 const PARAM_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/
 const PARAM_VALUE = z.union([
   z.number(), z.string().max(200), z.boolean(), z.null(),
@@ -427,21 +429,26 @@ export function registerBotTools(server: McpServer) {
 
   server.tool(
     'deploy_bot',
-    'Deploy a strategy as a trading bot. Defaults to paper trading for safety — whether a bot trades real money is determined entirely by the exchange account it\'s attached to (not by the `live` flag alone), so this refuses to deploy if `live` doesn\'t match the target exchange\'s own paper/live status. Check an exchange\'s status with list_exchanges first, or create one with create_paper_exchange. The bot trades on the strategy\'s own timeframe unless you pass `timeframe`; omit `name` and the server names it.',
+    'Deploy a strategy as a trading bot. Defaults to paper trading for safety — whether a bot trades real money is determined entirely by the exchange account it\'s attached to (not by the `live` flag alone), so this refuses to deploy if `live` doesn\'t match the target exchange\'s own paper/live status. Check an exchange\'s status with list_exchanges first, or create one with create_paper_exchange. The bot trades on the strategy\'s own timeframe unless you pass `timeframe`; omit `name` and the server names it.\n\n' +
+    'The bot STARTS TRADING when it is created, so give it its settings here, not in a later update_bot: `presetId` (a bot preset\'s ID or slug, e.g. "smart-accumulator-smart-dca": its parameters, timeframe, execution mode and version; it must belong to `strategyId`), `parameterOverrides` and `executionMode`. They are applied by the server in the same create, so the bot\'s first run already uses them and every plan, same-coin and history check runs on the final settings. With a preset the bot is created paused and then started, so it never runs without the preset; a start the server refuses (e.g. another bot already trades that coin on the account) leaves it paused and the reply says why. Pass `start: false` to create it paused (start it later with start_bot).',
     {
       strategyId: z.string().describe('Strategy ID to deploy'),
       exchangeId: z.string().describe('Exchange account ID. Its own isPaper status (see list_exchanges) determines whether this bot trades real money — must match the `live` flag below.'),
       symbol: z.string().default('BTC/USDT'),
       market: z.enum(['spot', 'futures']).optional().describe('Market type. Omit to use the account default (spot).'),
       name: z.string().optional().describe('Bot name. Omit to let the server name it.'),
-      timeframe: z.string().optional().describe('Candle timeframe the bot trades on (e.g. 15m, 1h, 4h, 1d). Omit to use the strategy\'s own timeframe; only set it to override that. Your plan may limit which timeframes are allowed.'),
+      timeframe: z.string().optional().describe('Candle timeframe the bot trades on (e.g. 15m, 1h, 4h, 1d). Omit to use the strategy\'s (or the preset\'s) own timeframe; only set it to override that. Your plan may limit which timeframes are allowed.'),
       live: z.boolean().default(false).describe('Must match the target exchange\'s own paper/live status: false requires a paper exchange, true requires a live one. Defaults to false (paper) for safety.'),
       positionSizePercent: z.number().min(0).max(100).default(10).describe('Position size as a percentage of account balance per trade. Defaults to 10%.'),
       leverage: z.number().min(1).max(125).default(1),
       stopLoss: z.number().optional().describe('Stop loss % (e.g. 5)'),
       takeProfit: z.number().optional().describe('Take profit % (e.g. 10)'),
+      presetId: z.string().regex(PRESET_REF_RE).optional().describe('Apply this bot preset at creation: its ID or slug (e.g. "trade-wind-long-only"), a preset of `strategyId`. Its parameters, timeframe, execution mode and version, with parameterOverrides / executionMode / timeframe on top. Never changes size or leverage.'),
+      parameterOverrides: z.record(z.string().regex(PARAM_KEY_RE), PARAM_VALUE).optional().describe('Strategy parameters, e.g. {"BUY_AMOUNT": 50}. With presetId they go on top of the preset\'s, and a null removes one of the preset\'s so the strategy default runs.'),
+      executionMode: z.enum(EXECUTION_MODES).optional().describe('"on_bar_close" (what backtests simulate) or "continuous". Omit for the preset\'s, else the server default.'),
+      start: z.boolean().default(true).describe('true (default): the bot starts trading once created. false: it is created paused; start it with start_bot.'),
     },
-    withErrorHandling(async ({ strategyId, exchangeId, symbol, market, name, timeframe, live, positionSizePercent, leverage, stopLoss, takeProfit }) => {
+    withErrorHandling(async ({ strategyId, exchangeId, symbol, market, name, timeframe, live, positionSizePercent, leverage, stopLoss, takeProfit, presetId, parameterOverrides, executionMode, start }) => {
       // The server enforces paper/live via OAuth scope tied to the target
       // exchange's real isPaper flag, but that surfaces as an opaque 403.
       // Check up front so a mismatch fails with an actionable message instead.
@@ -465,6 +472,21 @@ export function registerBotTools(server: McpServer) {
         )
       }
 
+      // A strategy bot created without a status starts trading at once (server default since
+      // cdcdf21d), so everything that shapes it goes in this ONE create. With a preset the
+      // create is PAUSED and a second call starts it: an older server drops applyPreset, and a
+      // bot it created running could trade on the strategy's defaults before any pause landed.
+      // The start (PATCH status) runs the same same-coin, plan and history checks as a running
+      // create, so nothing is skipped; a refused start leaves the bot paused.
+      // Without a preset a null parameter means nothing (there is no preset value to remove).
+      // The server takes a strategy ID: a slug is resolved first, as update_bot does (with a
+      // preset the server would otherwise refuse it as "for another strategy").
+      const strategy = (await resolveStrategyRef(strategyId)).id
+      const withPreset = presetId !== undefined
+      const overrides = parameterOverrides && !withPreset
+        ? Object.fromEntries(Object.entries(parameterOverrides).filter(([, v]) => v !== null))
+        : parameterOverrides
+
       // Creating a bot is not idempotent: sent once (retry: false), since a resend after a
       // timeout or gateway 5xx could create a second bot trading the same account.
       let data: any
@@ -474,14 +496,18 @@ export function registerBotTools(server: McpServer) {
           retry: false,
           body: {
             triggerType: 'strategy',
-            strategy: strategyId,
+            strategy,
             exchange: [exchangeId],
             symbol,
             // Only sent when given: with no name the server names the bot, and
-            // with no timeframe it uses the strategy's own timeframe.
+            // with no timeframe it uses the strategy's (or the preset's) own timeframe.
             ...(name ? { name } : {}),
             ...(timeframe ? { timeframe } : {}),
             ...(market ? { market } : {}),
+            ...(start === false || withPreset ? { status: 'paused' } : {}),
+            ...(withPreset ? { applyPreset: presetId } : {}),
+            ...(overrides && Object.keys(overrides).length ? { parameterOverrides: overrides } : {}),
+            ...(executionMode ? { spinConfig: { executionMode } } : {}),
             positionSizing: {
               type: 'percentage',
               value: positionSizePercent,
@@ -494,18 +520,56 @@ export function registerBotTools(server: McpServer) {
       } catch (err) {
         const reason = noAnswerReason(err)
         if (reason) {
-          return errorResult('DEPLOY_OUTCOME_UNKNOWN', `The deploy request got no answer (${reason}), so the bot may have been created. Check list_bots before deploying again: do not call deploy_bot again until you have.`)
+          return errorResult('DEPLOY_OUTCOME_UNKNOWN', `The deploy request got no answer (${reason}), so the bot may have been created. Check list_bots before deploying again: do not call deploy_bot again until you have.` +
+            (withPreset && start !== false ? ' With a preset it is created paused: if it exists, start it with start_bot.' : ''))
         }
         throw err
       }
       const bot = data.doc || data
-      const mode = exchangeIsPaper ? 'PAPER (simulated)' : 'LIVE'
-      return {
-        content: [{
-          type: 'text' as const,
-          text: `Bot deployed in ${mode} mode on ${targetExchange.name}.\nID: ${bot.id || bot._id}\nSymbol: ${symbol}\nLeverage: ${leverage}x\n${exchangeIsPaper ? 'Paper trading. No real money at risk.' : '\nThis bot is trading with REAL money.'}`,
-        }],
+      const botId = String(bot.id || bot._id)
+
+      // What the server stored, not what was asked for.
+      let status = typeof bot.status === 'string' ? bot.status : (start === false || withPreset ? 'paused' : 'active')
+      let startWarnings: string[] = []
+      let notStarted: string | undefined
+      if (withPreset) {
+        const applied = data?.appliedPreset
+        if (!applied || typeof applied !== 'object') {
+          // An older server dropped applyPreset: the bot is paused on the strategy's defaults
+          // and has never run.
+          return errorResult('PRESET_UNSUPPORTED', `The TradeStaq server created bot ${botId} PAUSED without applying preset "${presetId}" (this server version cannot apply presets at creation). It has never run. ` +
+            'Apply the preset with update_bot presetId, then start it with start_bot, or delete it.')
+        }
+        if (start !== false) {
+          try {
+            // Sent once (retry: false): a resend while a slow first start still runs is refused by
+            // the server's compare-and-set (409) and would read as "not started" for a bot that is
+            // running. No answer is reported as unknown below.
+            const started = await api<any>(`/api/bots/${botId}/status`, { method: 'PATCH', retry: false, body: { status: 'active' } })
+            if (typeof started?.status === 'string') status = started.status
+            startWarnings = serverWarnings(started)
+          } catch (err) {
+            const reason = noAnswerReason(err)
+            if (reason) status = 'unknown'
+            notStarted = reason
+              ? `The start request got no answer (${reason}), so it may or may not be running: check get_bot_status before calling start_bot.`
+              : `The start was refused${err instanceof ApiError && err.code ? ` (${err.code})` : ''}: ${capText(err instanceof Error ? err.message : String(err), 300) ?? 'no reason given'}. It stays paused: fix that and start it with start_bot, or delete it.`
+          }
+        }
       }
+      const running = status === 'active' || status === 'debug_active'
+      const mode = exchangeIsPaper ? 'PAPER (simulated)' : 'LIVE'
+      const lines = [`Bot deployed in ${mode} mode on ${targetExchange.name}.`, `ID: ${botId}`, `Symbol: ${symbol}`, `Leverage: ${leverage}x`]
+      if (withPreset) lines.push(`Preset: ${capText(data.appliedPreset.name, 80) ?? capText(data.appliedPreset.slug, 80) ?? presetId}`)
+      lines.push(notStarted
+        ? `Status: ${status}, NOT started. ${notStarted}`
+        : `Status: ${running ? 'running' : `${status} (start it with start_bot)`}`)
+      const createWarnings = serverWarnings(data)
+      for (const w of [...createWarnings, ...startWarnings.filter((w) => !createWarnings.includes(w))]) lines.push(`Warning: ${w}`)
+      lines.push(exchangeIsPaper
+        ? 'Paper trading. No real money at risk.'
+        : running ? '\nThis bot is trading with REAL money.' : '\nLive account: this bot trades REAL money once started.')
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] }
     }),
   )
 
@@ -741,7 +805,7 @@ export function registerBotTools(server: McpServer) {
     }),
   )
 
-  server.tool('start_bot', 'Activate a bot so it starts opening new positions on its next scheduled interval. Newly deployed strategy bots come up in "paused" status by default — this is the step that actually starts them trading (paper or live, depending on the exchange it\'s attached to). Check state first with get_bot_status; find bot IDs with list_bots.', {
+  server.tool('start_bot', 'Activate a paused or stopped bot so it starts opening new positions on its next scheduled interval (paper or live, depending on the exchange it\'s attached to). deploy_bot starts a new bot itself unless it was given start: false. Check state first with get_bot_status; find bot IDs with list_bots.', {
     id: z.string().describe('The bot ID to activate, obtained from list_bots.'),
   }, { title: 'Start Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: true }, withErrorHandling(async ({ id }) => {
     await api<any>(`/api/bots/${id}/status`, { method: 'PATCH', body: { status: 'active' } })
