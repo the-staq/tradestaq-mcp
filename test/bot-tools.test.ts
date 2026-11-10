@@ -328,7 +328,7 @@ describe('deploy_bot', () => {
 
     const handler = getToolHandler('deploy_bot')
     const result = await handler({
-      strategyId: 'strat-1', exchangeId: 'ex-paper-1', symbol: 'BTC/USDC:USDC', market: 'futures',
+      strategyId: '6a0000000000000000000001', exchangeId: 'ex-paper-1', symbol: 'BTC/USDC:USDC', market: 'futures',
       name: 'GridRunner BTC', live: false, positionSizePercent: 15, leverage: 2, stopLoss: 5, takeProfit: 10,
     })
 
@@ -337,7 +337,7 @@ describe('deploy_bot', () => {
       retry: false,
       body: {
         triggerType: 'strategy',
-        strategy: 'strat-1',
+        strategy: '6a0000000000000000000001',
         exchange: ['ex-paper-1'],
         symbol: 'BTC/USDC:USDC',
         name: 'GridRunner BTC',
@@ -355,11 +355,136 @@ describe('deploy_bot', () => {
       .mockResolvedValueOnce({ doc: { id: 'new-bot-2' } })
 
     const handler = getToolHandler('deploy_bot')
-    await handler({ strategyId: 'strat-1', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1 })
+    await handler({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1 })
 
     const body = mockApi.mock.calls[1][1].body
     expect(body).not.toHaveProperty('name')
     expect(body).not.toHaveProperty('timeframe')
+  })
+
+  // Value: protects=a bot never runs a spin on the strategy's defaults, and a refused deploy leaves no bot; fails_when=deploy_bot creates the bot running and applies the preset afterwards (seen live 2026-11-10: a Smart Accumulator bot ran on weekly defaults), or creates it running on a server that ignores applyPreset (it trades on defaults until a pause lands); seam=api mock
+  it('with a preset: a PAUSED create carrying applyPreset, then a start (which runs the start checks)', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
+      .mockResolvedValueOnce({ doc: { id: 'new-bot-p', status: 'paused' }, appliedPreset: { id: 'pr1', name: 'Smart Accumulator — Smart DCA', slug: 'smart-accumulator-smart-dca', strategy: '6a0000000000000000000001' } })
+      .mockResolvedValueOnce({ success: true, status: 'active', warnings: ['Bybit supplies 200 of the 499 candles this version wants'] })
+
+    const result = await getToolHandler('deploy_bot')({
+      strategyId: '6a0000000000000000000001', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', market: 'spot', live: false, positionSizePercent: 100, leverage: 1,
+      presetId: 'smart-accumulator-smart-dca', parameterOverrides: { BUY_AMOUNT: 50, GONE: null }, executionMode: 'on_bar_close',
+    })
+
+    expect(mockApi).toHaveBeenCalledTimes(3)
+    const body = mockApi.mock.calls[1][1].body
+    expect(body).toMatchObject({ strategy: '6a0000000000000000000001', status: 'paused', applyPreset: 'smart-accumulator-smart-dca', spinConfig: { executionMode: 'on_bar_close' } })
+    // With a preset a null reaches the server: it removes the preset's value (as update_bot).
+    expect(body.parameterOverrides).toEqual({ BUY_AMOUNT: 50, GONE: null })
+    expect(mockApi.mock.calls[2]).toEqual(['/api/bots/new-bot-p/status', { method: 'PATCH', retry: false, body: { status: 'active' } }])
+    const text = await textOf(result)
+    expect(text).toContain('Preset: Smart Accumulator — Smart DCA')
+    expect(text).toContain('Status: running')
+    expect(text).toContain('Warning: Bybit supplies 200 of the 499 candles')
+  })
+
+  it('a strategy slug is resolved to its ID before the create (the server compares the preset with an ID)', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
+      .mockResolvedValueOnce({ doc: { id: '6a0000000000000000000002', name: 'Trade Wind' } })
+      .mockResolvedValueOnce({ doc: { id: 'new-bot-g', status: 'paused' }, appliedPreset: { id: 'p', name: 'Long/Short' } })
+      .mockResolvedValueOnce({ success: true, status: 'active' })
+    await getToolHandler('deploy_bot')({ strategyId: 'trade-wind', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1, presetId: 'trade-wind-long-short' })
+    expect(mockApi.mock.calls[1][0]).toBe('/api/tradedroid/strategies/trade-wind')
+    expect(mockApi.mock.calls[2][1].body.strategy).toBe('6a0000000000000000000002')
+  })
+
+  it('with a preset, a refused start (same coin): the bot stays paused, the reason and code are shown, not an error', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [LIVE_EXCHANGE] })
+      .mockResolvedValueOnce({ doc: { id: 'new-bot-c', status: 'paused' }, appliedPreset: { id: 'p', name: 'P' } })
+      .mockRejectedValueOnce(new ApiError(409, 'SAME_COIN_BOT_RUNNING', 'Bot "Old" already runs BTC/USDT on this account.', false))
+    const result = await getToolHandler('deploy_bot')({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-live-1', symbol: 'BTC/USDT', live: true, positionSizePercent: 10, leverage: 1, presetId: 'p' })
+    expect(result.isError).toBeFalsy()
+    const text = await textOf(result)
+    expect(text).toContain('ID: new-bot-c')
+    expect(text).toContain('Status: paused, NOT started. The start was refused (SAME_COIN_BOT_RUNNING): Bot "Old" already runs BTC/USDT')
+    expect(text).toContain('trades REAL money once started')
+    expect(text).not.toContain('This bot is trading with REAL money')
+  })
+
+  it('with a preset, a start with no answer: says it may or may not be running (never "running" or "paused")', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
+      .mockResolvedValueOnce({ doc: { id: 'new-bot-t', status: 'paused' }, appliedPreset: { id: 'p', name: 'P' } })
+      .mockRejectedValueOnce(new ApiError(408, 'TIMEOUT', 'Request timed out', false))
+    const text = await textOf(await getToolHandler('deploy_bot')({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1, presetId: 'p' }))
+    expect(text).toContain('Status: unknown, NOT started. The start request got no answer (the request timed out), so it may or may not be running')
+    expect(text).not.toContain('Status: running')
+  })
+
+  it('with a preset, a create with no answer: says that if the bot exists it is paused, to start_bot it', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
+      .mockRejectedValueOnce(new ApiError(504, 'GATEWAY_TIMEOUT', 'Gateway timeout', false))
+    const result = await getToolHandler('deploy_bot')({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1, presetId: 'p' })
+    const { error } = JSON.parse(result.content[0].text)
+    expect(error.code).toBe('DEPLOY_OUTCOME_UNKNOWN')
+    expect(error.message).toContain('if it exists, start it with start_bot')
+  })
+
+  it('a preset the server refuses (wrong strategy, unknown, plan-locked): its error passes through, nothing else is sent', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
+      .mockRejectedValueOnce(new ApiError(400, 'preset_strategy_mismatch', "The preset 'x' belongs to another strategy.", false))
+    const result = await getToolHandler('deploy_bot')({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1, presetId: 'x' })
+    expect(result.isError).toBe(true)
+    expect(JSON.parse(result.content[0].text).error.code).toBe('preset_strategy_mismatch')
+    expect(mockApi).toHaveBeenCalledTimes(2)
+  })
+
+  it('an older server that ignores applyPreset: the bot was created paused and never started; nothing else is sent', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [LIVE_EXCHANGE] })
+      .mockResolvedValueOnce({ doc: { id: 'new-bot-u', status: 'paused' } }) // no appliedPreset
+    const result = await getToolHandler('deploy_bot')({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-live-1', symbol: 'BTC/USDT', live: true, positionSizePercent: 10, leverage: 1, presetId: 'p' })
+    expect(mockApi.mock.calls[1][1].body.status).toBe('paused')
+    expect(mockApi).toHaveBeenCalledTimes(2)
+    const { error } = JSON.parse(result.content[0].text)
+    expect(error.code).toBe('PRESET_UNSUPPORTED')
+    expect(error.message).toContain('new-bot-u PAUSED')
+    expect(error.message).toContain('It has never run')
+  })
+
+  it('presetId + start:false on a LIVE account: created paused in the one create, never started, says so', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [LIVE_EXCHANGE] })
+      .mockResolvedValueOnce({ doc: { id: 'new-bot-v', status: 'paused' }, appliedPreset: { id: 'p', name: 'P' } })
+    const result = await getToolHandler('deploy_bot')({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-live-1', symbol: 'BTC/USDT', live: true, positionSizePercent: 10, leverage: 1, presetId: 'p', start: false })
+    expect(mockApi.mock.calls[1][1].body.status).toBe('paused')
+    expect(mockApi).toHaveBeenCalledTimes(2)
+    const text = await textOf(result)
+    expect(text).toContain('Status: paused')
+    expect(text).toContain('trades REAL money once started')
+    expect(text).not.toContain('This bot is trading with REAL money')
+  })
+
+  it('without a preset: parameterOverrides (nulls dropped) and executionMode go in the create; server warnings are shown', async () => {
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockResolvedValueOnce({ doc: { id: 'new-bot-s', status: 'active' }, warnings: ['1 open position on BTC/USDT: the new bot will manage it'] })
+    const result = await getToolHandler('deploy_bot')({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1, parameterOverrides: { FREQUENCY: 'daily', GONE: null }, executionMode: 'continuous' })
+    const body = mockApi.mock.calls[1][1].body
+    expect(body.parameterOverrides).toEqual({ FREQUENCY: 'daily' })
+    expect(body.spinConfig).toEqual({ executionMode: 'continuous' })
+    expect(body).not.toHaveProperty('status')
+    expect(body).not.toHaveProperty('applyPreset')
+    expect(mockApi).toHaveBeenCalledTimes(2)
+    expect(await textOf(result)).toContain('Warning: 1 open position on BTC/USDT')
+  })
+
+  it('start:false without a preset creates the bot paused and stops there', async () => {
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockResolvedValueOnce({ doc: { id: 'new-bot-r', status: 'paused' } })
+    const result = await getToolHandler('deploy_bot')({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1, start: false })
+    expect(mockApi.mock.calls[1][1].body.status).toBe('paused')
+    expect(mockApi).toHaveBeenCalledTimes(2)
+    expect(await textOf(result)).toContain('Status: paused')
   })
 
   it('passes timeframe through when given', async () => {
@@ -368,7 +493,7 @@ describe('deploy_bot', () => {
       .mockResolvedValueOnce({ doc: { id: 'new-bot-3' } })
 
     const handler = getToolHandler('deploy_bot')
-    await handler({ strategyId: 'strat-1', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', timeframe: '4h', live: false, positionSizePercent: 10, leverage: 1 })
+    await handler({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', timeframe: '4h', live: false, positionSizePercent: 10, leverage: 1 })
 
     expect(mockApi.mock.calls[1][1].body.timeframe).toBe('4h')
   })
@@ -378,7 +503,7 @@ describe('deploy_bot', () => {
     mockApi
       .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
       .mockResolvedValueOnce({ doc: { id: 'new-bot-4' } })
-    await getToolHandler('deploy_bot')({ strategyId: 'strat-1', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1 })
+    await getToolHandler('deploy_bot')({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1 })
     expect(mockApi.mock.calls[0]).toEqual(['/api/exchanges'])
     expect(mockApi.mock.calls[1][1]).toMatchObject({ method: 'POST', retry: false })
   })
@@ -389,7 +514,7 @@ describe('deploy_bot', () => {
     ['a 504', new ApiError(504, 'HTTP_504', 'API returned 504 with a non-JSON response', false), 'HTTP 504'],
   ])('%s on the create POST: DEPLOY_OUTCOME_UNKNOWN (the bot may exist, check list_bots), not retryable', async (_label, err, reason) => {
     mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockRejectedValueOnce(err)
-    const result = await getToolHandler('deploy_bot')({ strategyId: 'strat-1', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1 })
+    const result = await getToolHandler('deploy_bot')({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1 })
     expect(result.isError).toBe(true)
     const { error } = JSON.parse(result.content[0].text)
     expect(error.code).toBe('DEPLOY_OUTCOME_UNKNOWN')
@@ -402,7 +527,7 @@ describe('deploy_bot', () => {
 
   it('a clean server refusal on the create POST keeps its own code and message', async () => {
     mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockRejectedValueOnce(new ApiError(403, 'HTTP_403', 'Tier limit exceeded', false))
-    const result = await getToolHandler('deploy_bot')({ strategyId: 'strat-1', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1 })
+    const result = await getToolHandler('deploy_bot')({ strategyId: '6a0000000000000000000001', exchangeId: 'ex-paper-1', symbol: 'BTC/USDT', live: false, positionSizePercent: 10, leverage: 1 })
     expect(JSON.parse(result.content[0].text).error).toMatchObject({ code: 'HTTP_403', message: 'Tier limit exceeded', retryable: false })
   })
 })
