@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-10
+
 ### Fixed
 - **`deploy_bot` creates a bot already configured.** A strategy bot starts trading when it is created, and `deploy_bot` could not set a preset or strategy parameters, so a bot ran on the strategy's defaults until a later `update_bot` landed (seen live: a Smart Accumulator bot made its first run on weekly defaults before its daily settings arrived). `deploy_bot` now takes `presetId`, `parameterOverrides` and `executionMode` and sends them in its create; the server (TradeStaq with `POST /api/bots` `applyPreset`) applies the preset before its plan, same-coin and history checks, so a refused deploy creates no bot. With a preset the bot is created paused and then started, so it never runs without the preset: an older server that cannot apply presets at creation leaves it paused (`PRESET_UNSUPPORTED`), and a start the server refuses (e.g. another bot already trades that coin) leaves it paused with the reason. A preset of another strategy is refused. A strategy slug is resolved to its ID first, as in `update_bot`. `start: false` creates the bot paused. The reply shows the status the server stored and its warnings (e.g. an open position the new bot will manage).
 - **Strategy and copy-trading writes need a write scope** (server-side, TradeStaq with this release): `create_strategy`, `update_strategy`, `validate_strategy_version`, `cancel_optimization_run` and `send_optimization_guidance` refuse a read-only token (`insufficient_scope`); `promote_strategy_version` needs `mcp:live`, since it changes what live bots run; `follow_trader` needs the scope of the account copied into.
