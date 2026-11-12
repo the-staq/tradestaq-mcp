@@ -218,7 +218,7 @@ MCP resources provide browsable data that AI clients can read directly:
 - Hosted at `https://mcp.tradestaq.com/mcp` for remote clients
 - JWT auth via OAuth PKCE or email/password login
 - All tools return structured JSON with error contract
-- Token auto-refresh when expiring within 1 hour
+- Token auto-refresh before the access token expires. Several local copies (say an interactive session plus headless `claude -p` runs) can share one sign-in: they refresh one at a time under a lockfile next to `~/.tradestaq/mcp-config.json`, and a copy whose tokens another one rotated picks up the new pair from the file
 
 ## Development
 

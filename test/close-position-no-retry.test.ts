@@ -12,7 +12,9 @@ const { mockLoadConfig, mockFetch } = vi.hoisted(() => ({
 
 vi.mock('../src/config.js', () => ({
   loadConfig: mockLoadConfig,
+  reloadConfig: mockLoadConfig,
   saveConfig: vi.fn(),
+  withConfigLock: (fn: () => Promise<unknown>) => fn(),
 }))
 
 vi.stubGlobal('fetch', mockFetch)

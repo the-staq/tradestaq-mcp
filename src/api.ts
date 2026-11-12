@@ -1,4 +1,4 @@
-import { loadConfig, saveConfig, isAuthenticated } from './config.js'
+import { loadConfig, reloadConfig, saveConfig, isAuthenticated, withConfigLock, type McpConfig } from './config.js'
 import { requestContext } from './request-context.js'
 
 export class ApiError extends Error {
@@ -37,26 +37,65 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+// Rotate the (short-lived, ~60 min) OAuth access token this long before it expires.
+const REFRESH_SKEW_MS = 5 * 60 * 1000
+// The refresh request runs while holding the cross-process config lock, so it must end
+// well before the lock counts as stale (30s, config.ts).
+const REFRESH_TIMEOUT_MS = 15_000
+
+/**
+ * An access token that can be sent as it is: present, not the one the server just refused,
+ * and not within REFRESH_SKEW_MS of its expiry.
+ */
+function hasFreshAccessToken(config: McpConfig, refusedToken?: string): boolean {
+  if (!config.token || config.token === refusedToken) return false
+  return !config.tokenExpiresAt || config.tokenExpiresAt - Date.now() > REFRESH_SKEW_MS
+}
+
 // Exchange the stored refresh token for a fresh access+refresh pair (OAuth 2.1
 // rotation, RFC 9700). stdio-only — hosted sessions never touch the shared file
-// token. Returns true when the config was updated with a new access token.
+// token. Returns true when the config now holds a usable access token: a new one,
+// or one another process put there first.
 //
-// Single-flight: concurrent callers (the client runs tool calls in parallel, e.g.
-// check_auth beside list_bots) share one refresh. Two refreshes would send the same
-// refresh token twice; the server treats a reuse as theft and revokes the whole
-// family, and the loser's invalid_grant then cleared the winner's new tokens.
+// Refresh tokens are single-use: the server treats one presented twice as theft and
+// revokes the whole token family, signing out every copy of this server. Two guards:
+//
+// - Within a process, concurrent callers (the client runs tool calls in parallel, e.g.
+//   check_auth beside list_bots) share one refresh (single-flight).
+// - Across processes sharing ~/.tradestaq/mcp-config.json (an interactive session plus
+//   headless `claude -p` runs), the refresh runs under a lockfile, and re-reads the file
+//   inside it: if another process already rotated the pair, this one uses that pair and
+//   sends nothing, instead of the used refresh token it still holds in memory.
+//
+// `refusedToken`: the access token the server just answered 401 for. It does not count as
+// usable even while its expiry is still ahead.
 let refreshInFlight: Promise<boolean> | null = null
-function oauthRefresh(): Promise<boolean> {
+function oauthRefresh(refusedToken?: string): Promise<boolean> {
   if (!refreshInFlight) {
-    refreshInFlight = oauthRefreshOnce().finally(() => {
+    refreshInFlight = oauthRefreshLocked(refusedToken).finally(() => {
       refreshInFlight = null
     })
   }
   return refreshInFlight
 }
 
-async function oauthRefreshOnce(): Promise<boolean> {
-  const config = loadConfig()
+async function oauthRefreshLocked(refusedToken?: string): Promise<boolean> {
+  try {
+    return await withConfigLock(() => oauthRefreshOnce(refusedToken))
+  } catch {
+    // No lock in time (another process is stuck mid-refresh) or the lockfile can't be
+    // created. Never refresh without it: the other process may be sending this same refresh
+    // token. Use whatever the file holds now; the next call tries again.
+    return hasFreshAccessToken(reloadConfig(), refusedToken)
+  }
+}
+
+// Runs holding the config lock.
+async function oauthRefreshOnce(refusedToken?: string): Promise<boolean> {
+  // The file, not this process's cached copy, is the truth here: another process may have
+  // rotated the pair since this one cached it (our refresh token is then already used).
+  const config = reloadConfig()
+  if (hasFreshAccessToken(config, refusedToken)) return true
   if (!config.refreshToken || !config.oauthClientId) return false
   const sentRefreshToken = config.refreshToken
   try {
@@ -69,31 +108,35 @@ async function oauthRefreshOnce(): Promise<boolean> {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     })
     if (!res.ok) {
       // invalid_grant → the refresh token is expired, revoked, or reuse-detected.
       // Clear stored tokens so the next call cleanly prompts re-authentication
       // instead of retrying a dead token forever.
-      // Only while the stored refresh token is still the one refused: if another refresh
-      // (another process sharing this config) rotated it meanwhile, those tokens are good.
+      // Only while the stored refresh token is still the one refused: if the file changed
+      // meanwhile (a sign-in, or a copy of this server without the lock), those tokens stand.
       if (res.status === 400 || res.status === 401) {
-        const c = loadConfig()
+        const c = reloadConfig()
         if (c.refreshToken === sentRefreshToken) {
           saveConfig({ ...c, token: undefined, tokenExpiresAt: undefined, refreshToken: undefined, refreshExpiresAt: undefined })
+          return false
         }
+        return hasFreshAccessToken(c, refusedToken)
       }
       return false
     }
     const data = (await res.json().catch(() => ({}))) as any
     if (!data.access_token) return false
-    const c = loadConfig()
+    // Re-read so fields written meanwhile (e.g. a cached OAuth client) are kept.
+    const c = reloadConfig()
     saveConfig({
       ...c,
       token: data.access_token,
       tokenExpiresAt: Date.now() + (data.expires_in || 3600) * 1000,
-      // Rotation: store the NEW refresh token; fall back to the old one only if
+      // Rotation: store the NEW refresh token; fall back to the one sent only if
       // the server didn't rotate (shouldn't happen, but don't lose the session).
-      refreshToken: data.refresh_token || c.refreshToken,
+      refreshToken: data.refresh_token || sentRefreshToken,
       refreshExpiresAt: Date.now() + 30 * 24 * 3600 * 1000,
     })
     return true
@@ -107,14 +150,17 @@ async function refreshTokenIfNeeded(): Promise<void> {
   // token — that bearer is owned by the client connector's OAuth flow, and
   // writing it to the shared config would leak it across sessions.
   if (requestContext.getStore()) return
-  const config = loadConfig()
+  let config = loadConfig()
+  // A missing or expiring token in this process's cached copy: look at the file first.
+  // Another process sharing it may have signed in or rotated the tokens since. This is
+  // also what api() reads before it throws AUTH_EXPIRED for a missing token.
+  if (!hasFreshAccessToken(config)) config = reloadConfig()
   if (!config.token) return
 
   // OAuth path: rotate via the refresh token when the (short-lived, ~60min)
   // access token is within 5 minutes of expiry or already expired.
   if (config.refreshToken) {
-    const skew = 5 * 60 * 1000
-    if (config.tokenExpiresAt && config.tokenExpiresAt - Date.now() > skew) return
+    if (hasFreshAccessToken(config)) return
     await oauthRefresh()
     return
   }
@@ -313,13 +359,21 @@ export async function api<T = unknown>(
             : new ApiError(0, 'NETWORK_ERROR', `Failed to reach TradeStaq API: ${(err as Error).message}`, retry)
 
       // stdio: a 401 despite the proactive refresh (token revoked, clock skew,
-      // or an expiry we missed) — try ONE rotation, then retry with the new
-      // token. Bounded by recovered401 so a persistently-rejected token can't loop.
-      if (apiErr.status === 401 && !store && !recovered401 && loadConfig().refreshToken) {
+      // or an expiry we missed). Another process sharing the config file may
+      // already have rotated the pair: then the file holds a newer access token,
+      // used as it is. Otherwise try ONE rotation (under the lock, which re-reads
+      // the file again), then retry with the new token. Bounded by recovered401
+      // so a persistently-rejected token can't loop.
+      if (apiErr.status === 401 && !store && !recovered401) {
         recovered401 = true
-        if (await oauthRefresh()) {
+        const onDisk = reloadConfig()
+        if (hasFreshAccessToken(onDisk, token)) {
+          token = onDisk.token!
+          continue
+        }
+        if (onDisk.refreshToken && (await oauthRefresh(token))) {
           const rotated = loadConfig().token
-          if (rotated) {
+          if (rotated && rotated !== token) {
             token = rotated
             continue
           }
