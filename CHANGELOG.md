@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-12
+
 ### Fixed
 - **Copies of the server running at once no longer sign each other out.** An interactive Claude Code session and headless `claude -p` runs share `~/.tradestaq/mcp-config.json`, but each copy cached it for its whole life and refreshed on its own. After one rotated the refresh token, another later sent the old one it still held; the server treats a reused refresh token as theft and revokes the whole session, so every copy failed with `AUTH_EXPIRED` until a new browser sign-in. A refresh now runs under a lockfile next to the config (`mcp-config.json.lock`) and re-reads the file inside it: when another copy has already rotated the pair, this copy uses those tokens and sends nothing. A lock older than 30s, or left by a process that no longer exists, is broken; a copy that can't get the lock within 35s sends no refresh (the next call tries again). The refresh request times out after 15s, so a holder never keeps the lock long. A copy whose cached token is missing or expiring, or that gets a 401, reads the file before anything else.
 - **The config file is written atomically** (a temp file renamed over it, always 0600), so a copy reading it while another writes never sees a half-written file and takes it for "signed out".
