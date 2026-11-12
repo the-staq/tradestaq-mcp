@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-12
+
 ### Added
 - **Public share links for bots:** `list_bot_share_links`, `create_bot_share_link` and `revoke_bot_share_link`. A link is `https://www.tradestaq.com/chart/<token>`, a live chart of the bot that anyone can open without an account.
   - Each link shows the bot's positions and trades by default; PnL and balance only when switched on. Expiry is `1h`, `24h`, `7d`, `30d` or `never`, and the expiry is required.
