@@ -1057,7 +1057,7 @@ describe('export_bot_trades', () => {
     mockApi
       .mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'GridRunner BTC', exchanges: [{ id: 'ex-1', isPaper: true }] } })
       .mockResolvedValueOnce({
-        trades: [{ symbol: 'BTC/USDT', side: 'long', pnl: 5, status: 'closed' }],
+        trades: [{ symbol: 'BTC/USDT', side: 'sell', positionSide: 'flat', pnl: 5, status: 'closed' }],
         pagination: { total: 1 },
       })
 
@@ -1087,32 +1087,53 @@ describe('export_bot_trades', () => {
       .mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'Crowd Fade ZEC', exchanges: [], stats: {} } })
       .mockResolvedValueOnce({
         trades: [
-          { symbol: 'ZEC/USDT', side: 'sell', pnl: -100, status: 'closed' },
-          { symbol: 'ZEC/USDT', side: 'buy', pnl: 50, status: 'closed' },
-          { symbol: 'ZEC/USDT', side: 'buy', status: 'closed' }, // entry leg, no pnl -- excluded from stats
-          { symbol: 'ZEC/USDT', side: 'buy', pnl: 25, status: 'canceled' }, // canceled -- excluded
+          { symbol: 'ZEC/USDT', side: 'buy', positionSide: 'flat', pnl: -100, status: 'closed' },
+          { symbol: 'ZEC/USDT', side: 'sell', positionSide: 'flat', pnl: 50, status: 'closed' },
+          { symbol: 'ZEC/USDT', side: 'buy', positionSide: 'flat', pnl: 25, status: 'canceled' }, // canceled -- not a trade
         ],
-        pagination: { total: 4 },
+        pagination: { total: 3 },
       })
 
     const handler = getToolHandler('export_bot_trades')
     const result = await handler({ id: 'bot-1', format: 'full' })
 
     const body = await jsonOf(result)
-    expect(body.stats.totalPnl).toBe(-50) // -100 + 50, excluding the entry leg and the canceled trade
+    expect(body.stats.totalPnl).toBe(-50)
     expect(body.stats.totalTrades).toBe(2)
     expect(body.stats.winningTrades).toBe(1)
     expect(body.stats.winRate).toBe(50)
-    // The full (unfiltered) trade list is still returned for inspection --
-    // only the STATS are scoped to real closing trades.
-    expect(body.trades).toHaveLength(4)
+    expect(body.trades.map((t: any) => t.direction)).toEqual(['short', 'long'])
+  })
+
+  it('counts each close once -- regression: the closed entry lot carries the same pnl as its exit record, so summing every record doubled totalPnl, totalTrades and the trade list', async () => {
+    mockApi
+      .mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'Trade Wind HYPE', exchanges: [] } })
+      .mockResolvedValueOnce({
+        trades: [
+          { _id: 'exit-1', symbol: 'HYPE/USDT:USDT', side: 'buy', positionSide: 'flat', status: 'closed', entryPrice: 77.296, exitPrice: 73.4, size: 0.32, pnl: 1.2, bot: 'bot-1', exchange: 'ex-1', closedAt: '2026-11-09T07:11:44.791Z' },
+          { _id: 'lot-1', symbol: 'HYPE/USDT:USDT', side: 'sell', positionSide: 'short', status: 'closed', entryPrice: 77.296, exitPrice: 73.4, size: 0.32, pnl: 1.2, bot: 'bot-1', exchange: 'ex-1', closedAt: '2026-11-09T07:11:44.700Z', createdAt: '2026-11-08T05:51:24.728Z' },
+          { _id: 'exit-2', symbol: 'HYPE/USDT:USDT', side: 'sell', positionSide: 'flat', status: 'closed', entryPrice: 81.4, exitPrice: 77.3, size: 0.3, pnl: -1.3, bot: 'bot-1', exchange: 'ex-1', closedAt: '2026-11-08T05:51:22.426Z' },
+          { _id: 'lot-2', symbol: 'HYPE/USDT:USDT', side: 'buy', positionSide: 'long', status: 'closed', entryPrice: 81.4, exitPrice: 77.3, size: 0.3, pnl: -1.3, bot: 'bot-1', exchange: 'ex-1', closedAt: '2026-11-08T05:51:22.324Z', createdAt: '2026-10-27T20:00:24.155Z' },
+        ],
+        pagination: { total: 4 },
+      })
+
+    const body = await jsonOf(await getToolHandler('export_bot_trades')({ id: 'bot-1', format: 'full' }))
+
+    expect(body.stats.totalTrades).toBe(2)
+    expect(body.stats.totalPnl).toBeCloseTo(-0.1)
+    expect(body.tradeCount).toBe(2)
+    expect(body.trades.map((t: any) => [t.id, t.direction, t.openedAt])).toEqual([
+      ['exit-1', 'short', '2026-11-08T05:51:24.728Z'],
+      ['exit-2', 'long', '2026-10-27T20:00:24.155Z'],
+    ])
   })
 
   it('flags truncation when the exchange holds more trades than the page fetched, instead of silently presenting a partial fetch as the complete history', async () => {
     mockApi
       .mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'Busy Bot', exchanges: [] } })
       .mockResolvedValueOnce({
-        trades: [{ symbol: 'BTC/USDT', side: 'sell', pnl: 1, status: 'closed' }],
+        trades: [{ symbol: 'BTC/USDT', side: 'sell', positionSide: 'flat', pnl: 1, status: 'closed' }],
         pagination: { total: 5000 },
       })
 
@@ -1129,7 +1150,7 @@ describe('export_bot_trades', () => {
     mockApi
       .mockResolvedValueOnce({ doc: { id: 'bot-1', name: 'Quiet Bot', exchanges: [] } })
       .mockResolvedValueOnce({
-        trades: [{ symbol: 'BTC/USDT', side: 'sell', pnl: 1, status: 'closed' }],
+        trades: [{ symbol: 'BTC/USDT', side: 'sell', positionSide: 'flat', pnl: 1, status: 'closed' }],
         pagination: { total: 1 },
       })
 
