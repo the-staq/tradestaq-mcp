@@ -164,7 +164,7 @@ For example, switching a paused 15m GhostRider bot to Trade Wind on 4h with its 
 
 | Tool | Description |
 |------|-------------|
-| `get_trade_history` | Closed trades with PnL, entry/exit prices |
+| `get_trade_history` | Closed trades, one row per close: direction, entry/exit prices, PnL, return on position size |
 | `get_performance_metrics` | ROI, win rate, Sortino ratio, PnL breakdown |
 
 ### Copy Trading
