@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-12
+
+### Added
+- **Public share links for bots:** `list_bot_share_links`, `create_bot_share_link` and `revoke_bot_share_link`. A link is `https://www.tradestaq.com/chart/<token>`, a live chart of the bot that anyone can open without an account.
+  - Each link shows the bot's positions and trades by default; PnL and balance only when switched on. Expiry is `1h`, `24h`, `7d`, `30d` or `never`, and the expiry is required.
+  - Creating is sent once (no resend after a timeout) and is limited to 10 links an hour.
+  - Listing needs any scope. Creating or revoking needs the write scope of the bot's account: `mcp:live` for a live account.
+  - **Needs TradeStaq v0.22.6.0 or later**, which gives MCP access to `/api/bots/[id]/share`. Older servers answer these calls with 401.
+
 ## [0.7.2] - 2026-11-12
 
 ### Fixed

@@ -149,6 +149,9 @@ Credentials never enter the chat when using the browser flow. Token is stored lo
 | `stop_bot` | Stop a running bot now (open positions are left unmanaged) |
 | `delete_bot` | Delete a bot (refused while it has an open trade) |
 | `close_position` | Close an open position (full or partial) |
+| `list_bot_share_links` | A bot's public chart links (tradestaq.com/chart/...) |
+| `create_bot_share_link` | Make a public link to a bot's live chart (choose expiry and whether PnL shows) |
+| `revoke_bot_share_link` | Turn a public chart link off |
 
 `deploy_bot` defaults to paper trading. Pass `live: true` for real money. The bot trades on the strategy's own timeframe; pass `timeframe` (e.g. `4h`) only to override it. Leave out `name` and the server names the bot. The bot starts trading as soon as it is created, so give it its settings in the same call: `presetId` (a preset's ID or slug, of the same strategy), `parameterOverrides` and `executionMode`; the server applies them in the create itself (with a preset the bot is created paused, then started). `strategyId` takes an ID or a slug. `start: false` creates it paused for `start_bot`.
 
