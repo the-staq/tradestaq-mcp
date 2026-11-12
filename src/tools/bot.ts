@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { api, ApiError } from '../api.js'
+import { closedTrades } from '../closed-trades.js'
 import { errorResult, jsonResult, withErrorHandling } from '../helpers.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
@@ -866,9 +867,15 @@ export function registerBotTools(server: McpServer) {
     // number that doesn't match the trades listed right next to it is
     // exactly the kind of mismatch that caused this bug to look like data
     // corruption instead of a truncated fetch.
-    const closingTrades = tradeList.filter((t: any) => t.status !== 'canceled' && typeof t.pnl === 'number')
-    const totalPnl = closingTrades.reduce((sum: number, t: any) => sum + (t.pnl || 0), 0)
-    const winningTrades = closingTrades.filter((t: any) => (t.pnl || 0) > 0).length
+    //
+    // A close is stored as one exit record plus the entry lot(s) it closed, and the
+    // closed lots carry the same PnL, so counting every record listed each trade twice
+    // and doubled totalPnl. closedTrades keeps the exit records only, as TradeStaq's own
+    // metrics do.
+    const trades = closedTrades(tradeList)
+    const closingTrades = trades.filter((t) => typeof t.pnl === 'number')
+    const totalPnl = closingTrades.reduce((sum, t) => sum + (t.pnl || 0), 0)
+    const winningTrades = closingTrades.filter((t) => (t.pnl || 0) > 0).length
 
     const result: any = {
       bot: {
@@ -881,18 +888,13 @@ export function registerBotTools(server: McpServer) {
         winningTrades,
         winRate: closingTrades.length ? (winningTrades / closingTrades.length) * 100 : undefined,
       },
-      tradeCount: tradeList.length,
+      tradeCount: trades.length,
       ...(truncated ? {
         truncated: true,
         totalTradesOnRecord: totalOnRecord,
-        warning: `Only the ${tradeList.length} most recent of ${totalOnRecord} total trades are included below -- the stats above reflect only this partial set, not the bot's full history. Ask for a narrower time range or treat totalPnl as a lower/upper bound only.`,
+        warning: `Only the ${tradeList.length} most recent of ${totalOnRecord} stored trade records (exit records plus the entry records they closed) were read, so the stats above cover only part of this bot's history. Treat totalPnl as partial.`,
       } : {}),
-      trades: tradeList.map((t: any) => ({
-        symbol: t.symbol, side: t.side,
-        entryPrice: t.entryPrice, exitPrice: t.exitPrice,
-        pnl: t.pnl, size: t.size, leverage: t.leverage,
-        status: t.status, openedAt: t.openedAt, closedAt: t.closedAt,
-      })),
+      trades,
       exportLinks: {
         csv: `/api/bots/${id}/export/csv`,
         pdf: `/api/bots/${id}/export/pdf`,

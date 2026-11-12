@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`get_trade_history` lists each closed trade once.** TradeStaq stores a close as one exit record plus the entry record(s) it closed, both carrying the PnL, and the tool listed every record. So each trade appeared twice, as a "buy" row and a "sell" row with the same PnL. Seen live: HYPE on Bitget, closed 2026-11-09.
+  - It now lists exit records only, the same records TradeStaq's metrics count.
+  - Each row has the trade's `direction` (long/short) instead of the order `side`, and `returnOnPositionPct` (PnL / (entry × size)). The return is left out when size is in contracts.
+  - Each row also has `openedAt` and `holdingMinutes`, taken from the entry records closed with it. Before, the tool returned an `openedAt` field that the server never sends.
+  - It also gives `botId`, `exchangeId`, `isPaper` and `closeReason`.
+  - The reply is `{ page, hasMore, trades }`. A page holds up to `limit` stored records, so it usually lists about half as many trades.
+- **Losses closed by the reconcile are no longer missing.** A lot the reconcile closed because the exchange position was already gone (`exchange_already_flat`, `strategy_spin_sync`) has no exit record, so counting exit records alone would hide it. Checked on the live accounts, it includes ZEC losses on Bitget on 2026-10-15. Such a lot is listed as its own trade with `noExitRecord: true`. `get_performance_metrics` still leaves these out.
+- **The exchange filter works.** The tool sent `exchange`, which `/api/trades/history` ignores, so the filter never narrowed anything. It now sends `exchangeId`.
+  - It takes an account ID from `list_exchanges`.
+  - It also takes a platform or account name, resolved to the one account it matches. A name that matches several accounts is refused.
+- **`export_bot_trades` no longer doubles a bot's PnL.** It summed every record, so `totalPnl`, `totalTrades` and `winRate` counted each close twice (once per entry lot as well). It now counts closed trades as above, and its trade list has the same rows.
+
 ## [0.7.1] - 2026-11-12
 
 ### Fixed
