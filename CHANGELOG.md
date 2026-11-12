@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-12
+
 ### Fixed
 - **`get_trade_history` lists each closed trade once.** TradeStaq stores a close as one exit record plus the entry record(s) it closed, both carrying the PnL, and the tool listed every record. So each trade appeared twice, as a "buy" row and a "sell" row with the same PnL. Seen live: HYPE on Bitget, closed 2026-11-09.
   - It now lists exit records only, the same records TradeStaq's metrics count.
