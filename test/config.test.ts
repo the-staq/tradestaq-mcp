@@ -4,6 +4,8 @@ vi.mock('node:fs', () => ({
   default: {
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
+    renameSync: vi.fn(),
+    rmSync: vi.fn(),
     mkdirSync: vi.fn(),
   },
 }))

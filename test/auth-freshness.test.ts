@@ -12,6 +12,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 const { state, mockFetch } = vi.hoisted(() => ({ state: { current: {} as any }, mockFetch: vi.fn() }))
 vi.mock('../src/config.js', () => ({
   loadConfig: () => state.current,
+  reloadConfig: () => state.current,
+  withConfigLock: (fn: () => Promise<unknown>) => fn(),
   saveConfig: (c: any) => {
     state.current = c
   },
