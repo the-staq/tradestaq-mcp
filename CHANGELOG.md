@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Share links no longer need `mcp:live`:** `create_bot_share_link` and `revoke_bot_share_link` work with `mcp:paper` on your own bots, live account or paper. Showing the balance of a live account still needs `mcp:live`; a read-only token is still refused. Only the tool text changed. **Needs the TradeStaq release with TODOS #148**; older servers still answer 403 for a live bot without `mcp:live`.
+
 ## [0.8.0] - 2026-11-12
 
 ### Added
