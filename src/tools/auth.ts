@@ -93,13 +93,13 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
 
   server.tool(
     'authenticate',
-    'Log in to TradeStaq via browser. Opens a login page in your browser — you authenticate there and the token is saved automatically. No credentials enter the chat.\n\nScope controls what the agent can do: "mcp:read" (view-only research agents), "mcp:paper" (paper-trade bots, safe default — cannot touch live money), "mcp:live" (full access including live-money deploys, live exchange connections, and wallet charges). Scopes are hierarchical: live implies paper implies read. When in doubt, pick paper first — the server returns 403 insufficient_scope if the agent tries a live action, and the user can always re-authorize with a broader scope.',
+    'Log in to TradeStaq via browser. Opens a login page in your browser — you authenticate there and the token is saved automatically. No credentials enter the chat.\n\nScope controls what the agent can do: "mcp:read" (view-only research agents), "mcp:paper" (paper-trade bots, safe default — cannot touch live money), "mcp:live" (full access including live-money deploys, live exchange connections, and wallet charges), "mcp:share" (only create and revoke public share links for the user\'s own bots, live or paper; nothing else). Read, paper and live are hierarchical: live implies paper implies read. mcp:share is separate: ask for "mcp:share" alone for an agent that only posts bot links, or "mcp:paper mcp:share" for both. When in doubt, pick paper first — the server returns 403 insufficient_scope if the agent tries a live action, and the user can always re-authorize with a broader scope.',
     {
       scope: z
         .string()
         .regex(/^mcp(:[a-z-]+)?(\s+mcp(:[a-z-]+)?)*$/, 'Scope must be space-separated mcp:* tokens')
         .default('mcp:paper')
-        .describe('OAuth scope to request. Known values today: "mcp:read" (view-only research agents), "mcp:paper" (paper-trade bots, safe default — cannot touch live money), "mcp:live" (full access including live-money deploys, live exchange connections, and wallet charges). The server may add newer scopes; this parameter is intentionally a string so forward-compat works without an npm bump.'),
+        .describe('OAuth scope to request. Known values today: "mcp:read" (view-only research agents), "mcp:paper" (paper-trade bots, safe default — cannot touch live money), "mcp:live" (full access including live-money deploys, live exchange connections, and wallet charges), "mcp:share" (only create and revoke public share links for the user\'s own bots, live or paper; not part of the read/paper/live ladder). The server may add newer scopes; this parameter is intentionally a string so forward-compat works without an npm bump.'),
     },
     async ({ scope }, extra) => {
       // Hosted (HTTP) transport: the loopback callback server and `open`
@@ -347,6 +347,7 @@ export function registerAuthTools(server: McpServer, transport: 'http' | 'stdio'
           const hasPaper = hasLive || scopes.includes('mcp:paper')
           lines.push(`Can trade live money: ${hasLive ? 'YES' : 'no (paper/read only)'}`)
           lines.push(`Can create paper exchanges + deploy paper bots: ${hasPaper ? 'YES' : 'no (read only)'}`)
+          lines.push(`Can create/revoke public bot share links: ${hasLive || scopes.includes('mcp:share') ? 'YES (own bots, live or paper)' : hasPaper ? 'paper bots only' : 'no'}`)
         } else {
           lines.push('Auth method: session cookie (dashboard). Full account access; no OAuth scope restrictions.')
         }
