@@ -2,8 +2,12 @@
 
 ## [Unreleased]
 
-### Changed
-- **Share links no longer need `mcp:live`:** `create_bot_share_link` and `revoke_bot_share_link` work with `mcp:paper` on your own bots, live account or paper. Showing the balance of a live account still needs `mcp:live`; a read-only token is still refused. Only the tool text changed. **Needs the TradeStaq release with TODOS #148**; older servers still answer 403 for a live bot without `mcp:live`.
+### Added
+- **`mcp:share`, a dedicated scope for bot share links.** `create_bot_share_link` and `revoke_bot_share_link` now work with `mcp:share`: create and turn off public links for your own bots, live or paper, and nothing else (no trading, no bot or strategy changes). It is outside the read/paper/live ladder: request it with `authenticate` scope `mcp:share` (or `mcp:paper mcp:share`). `mcp:paper` and `mcp:live` keep what they could before (paper bots / any bot), and `mcp:read` is still refused. Links made with only `mcp:share` cannot turn `showBalance` on and each records which app made it. `check_auth` shows whether the token can make links. **Needs the TradeStaq release with TODOS #148**; older servers do not know the scope.
+
+### Fixed
+- **Tool text no longer says a link can show the account balance.** `showBalance` only lights a "Balance" badge on the chart page; no balance figure is published. What a link can show is positions, trades and, with `showPnL`, the bot's size and PnL, read-only, to anyone with the URL.
+
 
 ## [0.8.0] - 2026-11-12
 

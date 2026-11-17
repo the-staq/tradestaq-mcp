@@ -323,7 +323,7 @@ export async function api<T = unknown>(
         // prompt-injection into the agent. Guidance to the agent is
         // phrased as user-surface advice, not as imperative tool calls.
         if (res.status === 403 && parseOk && data?.error === 'insufficient_scope') {
-          const KNOWN = new Set(['mcp:read', 'mcp:paper', 'mcp:live', 'mcp'])
+          const KNOWN = new Set(['mcp:read', 'mcp:paper', 'mcp:live', 'mcp:share', 'mcp'])
           const rawScope = typeof data?.scope === 'string' ? data.scope.split(/\s+/).filter(Boolean) : []
           const safeScope = rawScope.find((s: string) => KNOWN.has(s)) || 'a broader scope'
           throw new ApiError(
