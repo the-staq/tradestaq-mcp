@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tradestaq": {
+      "command": "npx",
+      "args": ["-y", "@the-staq/tradestaq-mcp"]
+    }
+  }
+}

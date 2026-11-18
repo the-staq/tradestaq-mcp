@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+- A `.mcp.json` at the repo root, so plugin directories that follow the Open Plugins standard (Cursor Directory and others) can detect the server.
+- A `LICENSE` file (MIT, as `package.json` already declared).
+
 ## [0.8.0] - 2026-11-12
 
 ### Added
