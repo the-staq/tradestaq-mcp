@@ -17,6 +17,7 @@ import { registerBacktestTools } from './tools/backtest.js'
 import { registerBotTools } from './tools/bot.js'
 import { registerTradeTools } from './tools/trades.js'
 import { registerShareTools } from './tools/share.js'
+import { registerWebhookTools } from './tools/webhooks.js'
 import { registerCopyTradingTools } from './tools/copy-trading.js'
 import { registerAdvisorTools } from './tools/advisor.js'
 import { registerPrompts } from './prompts/index.js'
@@ -43,6 +44,7 @@ function createServer(transport: 'http' | 'stdio'): McpServer {
   registerBotTools(server)
   registerTradeTools(server)
   registerShareTools(server)
+  registerWebhookTools(server)
   registerCopyTradingTools(server)
   registerAdvisorTools(server)
   registerPrompts(server)

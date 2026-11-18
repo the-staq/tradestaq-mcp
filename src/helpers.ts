@@ -53,6 +53,17 @@ export function errorResult(
   }
 }
 
+// A write sent with retry: false that got no answer: it timed out, never reached the server
+// or the server/gateway failed (5xx, e.g. a Cloudflare 524 while the server kept working).
+// The action may have been carried out. Returns a short reason, or undefined for a clean answer.
+export function noAnswerReason(err: unknown): string | undefined {
+  if (!(err instanceof ApiError)) return undefined
+  if (err.status === 408 || err.code === 'TIMEOUT') return 'the request timed out'
+  if (err.status === 0 || err.code === 'NETWORK_ERROR') return 'a network error'
+  if (err.status >= 500) return `HTTP ${err.status}`
+  return undefined
+}
+
 export function withErrorHandling<T extends (...args: any[]) => Promise<any>>(handler: T): T {
   return (async (...args: any[]) => {
     try {

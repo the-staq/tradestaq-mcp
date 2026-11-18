@@ -5,7 +5,7 @@
 
 **[Website](https://tradestaq.com)** · **[Docs](https://tradestaq.com/docs)** · **[MCP / AI Tools](https://tradestaq.com/mcp)** · **[Pricing](https://tradestaq.com/pricing)**
 
-**46 AI-powered trading tools for Claude, Cursor, and any MCP client.**
+**56 AI-powered trading tools for Claude, Cursor, and any MCP client.**
 
 Create strategies, backtest them, deploy trading bots, copy top traders, monitor positions, and manage your crypto portfolio, all from conversation. Supports Binance, Bybit, OKX, Bitget, Hyperliquid, dYdX, and more.
 
@@ -152,6 +152,13 @@ Credentials never enter the chat when using the browser flow. Token is stored lo
 | `list_bot_share_links` | A bot's public chart links (tradestaq.com/chart/...) |
 | `create_bot_share_link` | Make a public link to a bot's live chart (choose expiry and whether PnL shows) |
 | `revoke_bot_share_link` | Turn a public chart link off |
+| `list_bot_webhooks` | A bot's outgoing webhook destinations (header values are never shown) |
+| `add_bot_webhook` | Send a bot's trade opens and closes to an https URL (JSON body template, custom headers) |
+| `update_bot_webhook` | Change a destination (URL, body, headers, constants, events, on/off) |
+| `delete_bot_webhook` | Remove a destination |
+| `preview_bot_webhook` | Render the body with a sample trade; sends nothing |
+| `test_bot_webhook` | Send a REAL test request to the URL (needs `confirm: true`) |
+| `get_bot_webhook_deliveries` | A destination's delivery log: status, timing, errors |
 
 `deploy_bot` defaults to paper trading. Pass `live: true` for real money. The bot trades on the strategy's own timeframe; pass `timeframe` (e.g. `4h`) only to override it. Leave out `name` and the server names the bot. The bot starts trading as soon as it is created, so give it its settings in the same call: `presetId` (a preset's ID or slug, of the same strategy), `parameterOverrides` and `executionMode`; the server applies them in the create itself (with a preset the bot is created paused, then started). `strategyId` takes an ID or a slug. `start: false` creates it paused for `start_bot`.
 
@@ -162,6 +169,16 @@ For example, switching a paused 15m GhostRider bot to Trade Wind on 4h with its 
 ```json
 { "id": "6ab7c2d60014ba19b0c54258", "presetId": "trade-wind-long-short", "timeframe": "4h", "name": "Trade Wind · SUI · 4h" }
 ```
+
+### Outgoing webhooks
+
+A bot can send every trade it opens or closes to a URL you choose, for example a signal-bot endpoint on an exchange or your own service. Each event is an HTTP POST with a JSON body you shape with a template (`{{action}}`, `{{symbol}}`, `{{price}}`, `{{size}}`, `{{pnl}}`, `{{const.NAME}}` and more; `add_bot_webhook` lists them all) and the headers you set.
+
+- Add one with `add_bot_webhook`, or give `deploy_bot` / `update_bot` a `webhooks` array. With `deploy_bot` the destinations are added while the bot is still paused and the bot is started afterwards, so its first trade is not missed. If a destination is refused, the bot is kept, left paused, and the reply says which webhook failed and why. `update_bot` only ever adds; use `update_bot_webhook` and `delete_bot_webhook` to change or remove one.
+- Header values (tokens) are write-only: they are encrypted, never shown again and never repeated by the tools. Put secrets in headers, not in the URL. Constants are shown in plain text.
+- Check the body with `preview_bot_webhook` first: it renders a sample trade and sends nothing. `test_bot_webhook` sends a real request, and a trading service may act on it, so it needs `confirm: true` and the user's agreement.
+- Paper trades are only sent when `includePaper` is true. The server turns a destination off after 20 failed events in a row; `get_bot_webhook_deliveries` shows why.
+- Needs a TradeStaq plan with signal forwarding (otherwise the server answers 403) and the write scope of the bot's account (`mcp:live` for a live bot). Reading and the delivery log work with any scope. A bot has up to 5 destinations.
 
 ### Trade History
 
@@ -209,7 +226,7 @@ MCP resources provide browsable data that AI clients can read directly:
 ┌──────────────┐◄──────────►┐                  ┌────────────────►┌──────────────┐
 │Claude Desktop│             │                  │                 │              │
 │Cursor / CLI  │             │  tradestaq-mcp   │   Bearer JWT    │  TradeStaq   │
-└──────────────┘             │  46 tools        │◄────────────────│  API         │
+└──────────────┘             │  56 tools        │◄────────────────│  API         │
                              │  3 prompts       │                 │              │
 ┌──────────────┐  HTTP+SSE  │  3 resources      │                 └──────────────┘
 │ Any MCP      │◄──────────►│                  │

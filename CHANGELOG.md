@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+- **Outgoing webhooks for bots:** `list_bot_webhooks`, `add_bot_webhook`, `update_bot_webhook`, `delete_bot_webhook`, `preview_bot_webhook`, `test_bot_webhook` and `get_bot_webhook_deliveries`. A bot's trade opens and closes (paper trades only with `includePaper`) are POSTed to an https URL with a JSON body from a template (`{{action}}`, `{{symbol}}`, `{{price}}`, `{{const.NAME}}`, and more) and custom headers.
+  - Header values are write-only: never returned, never repeated in a result or an error (only the name and a masked hint). Creates, edits and tests are sent once, with no resend after a timeout.
+  - `test_bot_webhook` sends a real request to the URL and needs `confirm: true`; `preview_bot_webhook` renders the body with a sample trade and sends nothing.
+  - `deploy_bot` takes a `webhooks` array. The bot is then created paused, the destinations are added, and the bot is started last (unless `start: false`). If a destination is refused the bot is kept but not started, nothing is retried, and the reply names the failed webhook. `update_bot` takes a `webhooks` array too: it only adds destinations (never replaces or removes), and a webhooks-only call is allowed.
+  - **Needs the TradeStaq release that ships outgoing webhooks** (the `/api/bots/[id]/webhooks` routes) and a plan with signal forwarding (`allowSignalForwarding`); otherwise the server answers 403/404. Writes need the write scope of the bot's account (`mcp:live` for a live bot); listing and the delivery log need any scope.
+
 ## [0.8.0] - 2026-11-12
 
 ### Added

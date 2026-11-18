@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { api, ApiError } from '../api.js'
 import { closedTrades } from '../closed-trades.js'
-import { errorResult, jsonResult, withErrorHandling } from '../helpers.js'
+import { errorResult, jsonResult, noAnswerReason, withErrorHandling } from '../helpers.js'
+import { addWebhooksToBot, webhookFailureResult, webhookInputSchema, webhookSummaryLines, webhookSummaryView, type WebhookOutcome } from './webhooks.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 // The Bots collection has NO top-level isPaper/paperTrading field -- whether a
@@ -18,17 +19,6 @@ function strategyNameOf(bot: any): string | undefined {
   if (bot.strategyDetails?.name) return bot.strategyDetails.name
   if (typeof bot.strategy === 'object' && bot.strategy) return bot.strategy.name
   return typeof bot.strategy === 'string' ? bot.strategy : undefined
-}
-
-// A write sent with retry: false that got no answer: it timed out, never reached the server
-// or the server/gateway failed (5xx, e.g. a Cloudflare 524 while the server kept working).
-// The action may have been carried out. Returns a short reason, or undefined for a clean answer.
-function noAnswerReason(err: unknown): string | undefined {
-  if (!(err instanceof ApiError)) return undefined
-  if (err.status === 408 || err.code === 'TIMEOUT') return 'the request timed out'
-  if (err.status === 0 || err.code === 'NETWORK_ERROR') return 'a network error'
-  if (err.status >= 500) return `HTTP ${err.status}`
-  return undefined
 }
 
 // Server answers (503) that say the close was refused before anything was sent: the
@@ -431,7 +421,8 @@ export function registerBotTools(server: McpServer) {
   server.tool(
     'deploy_bot',
     'Deploy a strategy as a trading bot. Defaults to paper trading for safety — whether a bot trades real money is determined entirely by the exchange account it\'s attached to (not by the `live` flag alone), so this refuses to deploy if `live` doesn\'t match the target exchange\'s own paper/live status. Check an exchange\'s status with list_exchanges first, or create one with create_paper_exchange. The bot trades on the strategy\'s own timeframe unless you pass `timeframe`; omit `name` and the server names it.\n\n' +
-    'The bot STARTS TRADING when it is created, so give it its settings here, not in a later update_bot: `presetId` (a bot preset\'s ID or slug, e.g. "smart-accumulator-smart-dca": its parameters, timeframe, execution mode and version; it must belong to `strategyId`), `parameterOverrides` and `executionMode`. They are applied by the server in the same create, so the bot\'s first run already uses them and every plan, same-coin and history check runs on the final settings. With a preset the bot is created paused and then started, so it never runs without the preset; a start the server refuses (e.g. another bot already trades that coin on the account) leaves it paused and the reply says why. Pass `start: false` to create it paused (start it later with start_bot).',
+    'The bot STARTS TRADING when it is created, so give it its settings here, not in a later update_bot: `presetId` (a bot preset\'s ID or slug, e.g. "smart-accumulator-smart-dca": its parameters, timeframe, execution mode and version; it must belong to `strategyId`), `parameterOverrides` and `executionMode`. They are applied by the server in the same create, so the bot\'s first run already uses them and every plan, same-coin and history check runs on the final settings. With a preset the bot is created paused and then started, so it never runs without the preset; a start the server refuses (e.g. another bot already trades that coin on the account) leaves it paused and the reply says why. Pass `start: false` to create it paused (start it later with start_bot).\n\n' +
+    'Webhooks (`webhooks`): outgoing webhook destinations for the bot\'s trade events (opens and closes; paper only with includePaper), same fields as add_bot_webhook (read its description for the template variables; needs a plan with signal forwarding and write access to the account). With `webhooks` the bot is created PAUSED, the destinations are added, and only then is it started (unless `start: false`), so its first trade is never missed. If a destination cannot be added, the bot is NOT retried, NOT deleted and NOT started (a bot meant to send signals must not trade unobserved): the reply says the bot exists, which webhook failed and why; fix it with add_bot_webhook, then start_bot. Confirm each URL with the user first; header values are write-only and never shown.',
     {
       strategyId: z.string().describe('Strategy ID to deploy'),
       exchangeId: z.string().describe('Exchange account ID. Its own isPaper status (see list_exchanges) determines whether this bot trades real money — must match the `live` flag below.'),
@@ -448,8 +439,9 @@ export function registerBotTools(server: McpServer) {
       parameterOverrides: z.record(z.string().regex(PARAM_KEY_RE), PARAM_VALUE).optional().describe('Strategy parameters, e.g. {"BUY_AMOUNT": 50}. With presetId they go on top of the preset\'s, and a null removes one of the preset\'s so the strategy default runs.'),
       executionMode: z.enum(EXECUTION_MODES).optional().describe('"on_bar_close" (what backtests simulate) or "continuous". Omit for the preset\'s, else the server default.'),
       start: z.boolean().default(true).describe('true (default): the bot starts trading once created. false: it is created paused; start it with start_bot.'),
+      webhooks: z.array(webhookInputSchema).max(5).optional().describe('Outgoing webhook destinations to add to the bot BEFORE it starts (up to 5), each with name, url (https), bodyTemplate, headers, constants, onOpen, onClose, includePaper, enabled: the same fields as add_bot_webhook. Confirm the URLs with the user; put secrets in header values (write-only).'),
     },
-    withErrorHandling(async ({ strategyId, exchangeId, symbol, market, name, timeframe, live, positionSizePercent, leverage, stopLoss, takeProfit, presetId, parameterOverrides, executionMode, start }) => {
+    withErrorHandling(async ({ strategyId, exchangeId, symbol, market, name, timeframe, live, positionSizePercent, leverage, stopLoss, takeProfit, presetId, parameterOverrides, executionMode, start, webhooks }) => {
       // The server enforces paper/live via OAuth scope tied to the target
       // exchange's real isPaper flag, but that surfaces as an opaque 403.
       // Check up front so a mismatch fails with an actionable message instead.
@@ -484,6 +476,10 @@ export function registerBotTools(server: McpServer) {
       // preset the server would otherwise refuse it as "for another strategy").
       const strategy = (await resolveStrategyRef(strategyId)).id
       const withPreset = presetId !== undefined
+      const hasWebhooks = !!webhooks && webhooks.length > 0
+      // A preset or webhooks need the bot to exist PAUSED first: the preset must be applied, and
+      // the destinations must exist, before its first run.
+      const startsLater = withPreset || hasWebhooks
       const overrides = parameterOverrides && !withPreset
         ? Object.fromEntries(Object.entries(parameterOverrides).filter(([, v]) => v !== null))
         : parameterOverrides
@@ -505,7 +501,7 @@ export function registerBotTools(server: McpServer) {
             ...(name ? { name } : {}),
             ...(timeframe ? { timeframe } : {}),
             ...(market ? { market } : {}),
-            ...(start === false || withPreset ? { status: 'paused' } : {}),
+            ...(start === false || startsLater ? { status: 'paused' } : {}),
             ...(withPreset ? { applyPreset: presetId } : {}),
             ...(overrides && Object.keys(overrides).length ? { parameterOverrides: overrides } : {}),
             ...(executionMode ? { spinConfig: { executionMode } } : {}),
@@ -522,7 +518,7 @@ export function registerBotTools(server: McpServer) {
         const reason = noAnswerReason(err)
         if (reason) {
           return errorResult('DEPLOY_OUTCOME_UNKNOWN', `The deploy request got no answer (${reason}), so the bot may have been created. Check list_bots before deploying again: do not call deploy_bot again until you have.` +
-            (withPreset && start !== false ? ' With a preset it is created paused: if it exists, start it with start_bot.' : ''))
+            (startsLater && start !== false ? ` With ${withPreset ? 'a preset' : 'webhooks'} it is created paused${hasWebhooks ? ' and has no webhook yet' : ''}: if it exists, ${hasWebhooks ? 'add its webhooks with add_bot_webhook and ' : ''}start it with start_bot.` : ''))
         }
         throw err
       }
@@ -530,7 +526,7 @@ export function registerBotTools(server: McpServer) {
       const botId = String(bot.id || bot._id)
 
       // What the server stored, not what was asked for.
-      let status = typeof bot.status === 'string' ? bot.status : (start === false || withPreset ? 'paused' : 'active')
+      let status = typeof bot.status === 'string' ? bot.status : (start === false || startsLater ? 'paused' : 'active')
       let startWarnings: string[] = []
       let notStarted: string | undefined
       if (withPreset) {
@@ -539,25 +535,44 @@ export function registerBotTools(server: McpServer) {
           // An older server dropped applyPreset: the bot is paused on the strategy's defaults
           // and has never run.
           return errorResult('PRESET_UNSUPPORTED', `The TradeStaq server created bot ${botId} PAUSED without applying preset "${presetId}" (this server version cannot apply presets at creation). It has never run. ` +
-            'Apply the preset with update_bot presetId, then start it with start_bot, or delete it.')
-        }
-        if (start !== false) {
-          try {
-            // Sent once (retry: false): a resend while a slow first start still runs is refused by
-            // the server's compare-and-set (409) and would read as "not started" for a bot that is
-            // running. No answer is reported as unknown below.
-            const started = await api<any>(`/api/bots/${botId}/status`, { method: 'PATCH', retry: false, body: { status: 'active' } })
-            if (typeof started?.status === 'string') status = started.status
-            startWarnings = serverWarnings(started)
-          } catch (err) {
-            const reason = noAnswerReason(err)
-            if (reason) status = 'unknown'
-            notStarted = reason
-              ? `The start request got no answer (${reason}), so it may or may not be running: check get_bot_status before calling start_bot.`
-              : `The start was refused${err instanceof ApiError && err.code ? ` (${err.code})` : ''}: ${capText(err instanceof Error ? err.message : String(err), 300) ?? 'no reason given'}. It stays paused: fix that and start it with start_bot, or delete it.`
-          }
+            'Apply the preset with update_bot presetId, then start it with start_bot, or delete it.' +
+            (hasWebhooks ? ' Its webhooks were NOT added either: add them with add_bot_webhook.' : ''))
         }
       }
+
+      // Webhooks go in BEFORE the start, so the bot's first trade is never missed. A refused
+      // destination does not undo anything: the bot is not retried, not deleted and, because a
+      // bot meant to send signals must not trade unobserved, not started.
+      let webhookOutcome: WebhookOutcome | undefined
+      if (hasWebhooks) {
+        webhookOutcome = await addWebhooksToBot(botId, webhooks!)
+        if (webhookOutcome.failed) {
+          return webhookFailureResult(botId, webhookOutcome, {
+            botStep: `Bot ${botId} was created${withPreset ? ' with its preset' : ''} and is PAUSED.`,
+            startNote: start === false
+              ? 'It stays paused, as you asked.'
+              : 'It was NOT started: a bot meant to send signals must not trade before its webhooks work. Start it with start_bot once they do, or delete it with delete_bot.',
+          })
+        }
+      }
+
+      if (startsLater && start !== false) {
+        try {
+          // Sent once (retry: false): a resend while a slow first start still runs is refused by
+          // the server's compare-and-set (409) and would read as "not started" for a bot that is
+          // running. No answer is reported as unknown below.
+          const started = await api<any>(`/api/bots/${botId}/status`, { method: 'PATCH', retry: false, body: { status: 'active' } })
+          if (typeof started?.status === 'string') status = started.status
+          startWarnings = serverWarnings(started)
+        } catch (err) {
+          const reason = noAnswerReason(err)
+          if (reason) status = 'unknown'
+          notStarted = reason
+            ? `The start request got no answer (${reason}), so it may or may not be running: check get_bot_status before calling start_bot.`
+            : `The start was refused${err instanceof ApiError && err.code ? ` (${err.code})` : ''}: ${capText(err instanceof Error ? err.message : String(err), 300) ?? 'no reason given'}. It stays paused: fix that and start it with start_bot, or delete it.`
+        }
+      }
+
       const running = status === 'active' || status === 'debug_active'
       const mode = exchangeIsPaper ? 'PAPER (simulated)' : 'LIVE'
       const lines = [`Bot deployed in ${mode} mode on ${targetExchange.name}.`, `ID: ${botId}`, `Symbol: ${symbol}`, `Leverage: ${leverage}x`]
@@ -565,6 +580,7 @@ export function registerBotTools(server: McpServer) {
       lines.push(notStarted
         ? `Status: ${status}, NOT started. ${notStarted}`
         : `Status: ${running ? 'running' : `${status} (start it with start_bot)`}`)
+      if (webhookOutcome) lines.push(...webhookSummaryLines(webhookOutcome))
       const createWarnings = serverWarnings(data)
       for (const w of [...createWarnings, ...startWarnings.filter((w) => !createWarnings.includes(w))]) lines.push(`Warning: ${w}`)
       lines.push(exchangeIsPaper
@@ -581,6 +597,7 @@ export function registerBotTools(server: McpServer) {
     'Strategy switch (strategyId) and timeframe change need the bot to be FLAT: no open position and no working order. A bot that holds one is refused (OPEN_POSITION) and nothing is changed, because the new strategy would adopt a position it did not open (e.g. a long-only strategy inheriting a short). Pause it first with stopAfterClose:true (it keeps managing the position, opens nothing new and pauses once flat), wait until get_bot_status shows no openPosition, then switch. A switch starts the strategy state over and drops the old strategy\'s parameters, preset and stale owed exits; the new strategy runs its stable channel unless you pass versionChannel / pinnedVersionId. The bot keeps its status: a paused bot stays paused until you start_bot it.\n\n' +
     'Preset (presetId): applies it as the dashboard does when you pick one: its strategy, parameter overrides, timeframe, execution mode / interval and version, with anything you pass explicitly on top. The same flat rule applies when it changes the strategy or timeframe.\n\n' +
     'Scope: editing a paper bot needs mcp:paper; any change to a LIVE bot (rename, strategy, timeframe, parameters, risk) needs mcp:live. The server enforces it (INSUFFICIENT_SCOPE).\n\n' +
+    'Webhooks (`webhooks`): ADDS outgoing webhook destinations to the bot (same fields as add_bot_webhook; read its description for the template variables). It never replaces or deletes the destinations the bot already has: use update_bot_webhook to change one and delete_bot_webhook to remove one. Applied after the other changes in this call: if a destination is refused, the other changes stay saved, nothing is retried and the reply says which webhook failed and why. Needs a plan with signal forwarding; confirm the URLs with the user (the bot\'s trade events go there), header values are write-only. A webhooks-only call is allowed.\n\n' +
     'Returns the resulting config (strategy, version and channel, timeframe, mode, parameter overrides, size, leverage, status) and any server warnings, e.g. that the exchange cannot supply enough candle history. A stopAfterClose-only call returns a one-line confirmation. Get bot IDs from list_bots; check current values with get_bot_status.',
     {
       id: z.string().describe('The bot ID to update, obtained from list_bots.'),
@@ -600,13 +617,15 @@ export function registerBotTools(server: McpServer) {
       takeProfit: z.number().optional().describe('New take profit %. Omit to leave unchanged.'),
       notifyOnTrade: z.boolean().optional().describe('Whether to send a Telegram notification for each trade this bot executes. Omit to leave unchanged.'),
       stopAfterClose: z.boolean().optional().describe('true: keep managing the open position, open no new entries, pause automatically once flat (immediately if already flat); false: cancel. Only an active bot can be set. Changing the bot\'s status (start_bot/stop_bot) also cancels it. Use it to get a bot flat before a strategy or timeframe change. Omit to leave unchanged.'),
+      webhooks: z.array(webhookInputSchema).max(5).optional().describe('Outgoing webhook destinations to ADD (up to 5; the bot allows 5 in all), same fields as add_bot_webhook. Existing destinations are never replaced or removed. Confirm the URLs with the user; put secrets in header values (write-only).'),
     },
-    { title: 'Update Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    { title: 'Update Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     withErrorHandling(async (args) => {
       const {
         id, name, strategyId, presetId, versionChannel, pinnedVersionId, timeframe, executionMode, spinIntervalSeconds,
-        parameterOverrides, resetParameterOverrides, leverage, positionSizePercent, stopLoss, takeProfit, notifyOnTrade, stopAfterClose,
+        parameterOverrides, resetParameterOverrides, leverage, positionSizePercent, stopLoss, takeProfit, notifyOnTrade, stopAfterClose, webhooks,
       } = args
+      const hasWebhooks = !!webhooks && webhooks.length > 0
       const body: Record<string, unknown> = {}
       const parts: string[] = []
 
@@ -740,15 +759,18 @@ export function registerBotTools(server: McpServer) {
 
       if (stopAfterClose !== undefined) body.stopAfterClose = stopAfterClose
 
-      if (!Object.keys(body).length) {
+      if (!Object.keys(body).length && !hasWebhooks) {
         throw new ApiError(400, 'NO_CHANGES', 'No fields provided to update.', false)
       }
 
+      // A webhooks-only call changes nothing on the bot itself: no PATCH.
       let res: any
-      try {
-        res = await api<any>(`/api/bots/${id}`, { method: 'PATCH', body })
-      } catch (err) {
-        throw explainPatchError(err, id, bot)
+      if (Object.keys(body).length) {
+        try {
+          res = await api<any>(`/api/bots/${id}`, { method: 'PATCH', body })
+        } catch (err) {
+          throw explainPatchError(err, id, bot)
+        }
       }
 
       if (presetId !== undefined) {
@@ -773,10 +795,25 @@ export function registerBotTools(server: McpServer) {
         }
       }
 
+      // Destinations are added after the bot's own changes landed, and only ever added. A
+      // refused one leaves those changes saved and nothing is retried or removed.
+      let webhookOutcome: WebhookOutcome | undefined
+      if (hasWebhooks) {
+        webhookOutcome = await addWebhooksToBot(id, webhooks!)
+        if (webhookOutcome.failed) {
+          return webhookFailureResult(id, webhookOutcome, {
+            botStep: Object.keys(body).length ? `Bot ${id} was updated (${parts.join(', ')}) and those changes are saved.` : `Bot ${id} was not changed.`,
+            startNote: 'The bot\'s status was not touched.',
+          })
+        }
+        parts.push(`webhooks added: ${webhookOutcome.added.map((a) => `"${a.name}"`).join(', ')}`)
+      }
+
       const message = `Bot ${id} updated. ${parts.join(', ')}`
-      // A stopAfterClose-only call keeps its one-line reply (no GET before or after).
+      // A stopAfterClose-only or webhooks-only call keeps its one-line reply (no GET before or after).
       if (!riskChanged && notifyOnTrade === undefined && !configChanged) {
-        return { content: [{ type: 'text' as const, text: message }] }
+        const text = webhookOutcome ? `${message}\n${webhookSummaryLines(webhookOutcome).join('\n')}` : message
+        return { content: [{ type: 'text' as const, text }] }
       }
 
       // The resulting config as the server now reports it (strategy name, the version it
@@ -802,6 +839,7 @@ export function registerBotTools(server: McpServer) {
         bot: view,
         ...(warnings.length ? { warnings } : {}),
         ...(notes.length ? { notes } : {}),
+        ...(webhookOutcome ? { webhooks: webhookSummaryView(webhookOutcome) } : {}),
       })
     }),
   )
