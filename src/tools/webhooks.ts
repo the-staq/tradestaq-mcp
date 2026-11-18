@@ -34,13 +34,15 @@ const TEMPLATE_HELP =
   'action is enter_long, exit_long, enter_short or exit_short; side is long or short; symbol is like BTC/USDT:USDT, base like BTC, quote like USDT; ' +
   'instrument_id is the exchange\'s own market id when known (e.g. OKX BTC-USDT-SWAP), else empty; price, size (base units), notional_usd, stop, take_profit are numbers; ' +
   'pnl and reason are set on closes only; timestamp is ISO 8601, timestamp_ms is milliseconds; is_paper is true or false; source is strategy, signal, manual, reconcile, bot_deleted or other. ' +
-  'Use {{const.NAME}} for a fixed value from `constants` (e.g. an OKX signal token). ' +
+  'Use {{const.NAME}} for a fixed, NON-SECRET value from `constants` (constants are stored and shown as plain text: put tokens and keys in `headers`, whose values are encrypted and never shown again). ' +
   'The text must be valid JSON once filled in: put {{variables}} inside quotes for text and bare for numbers (e.g. {"side": "{{side}}", "px": {{price}}}). Unknown variables are rejected. ' +
   'Leave bodyTemplate empty to send the default body (every variable as a JSON field). Preview it first with preview_bot_webhook.'
 
 const WEBHOOK_PLAN_NOTE =
   'Needs a TradeStaq plan that includes signal forwarding (the server answers 403 plan_required otherwise; reading, deleting and the delivery log stay open after a downgrade). ' +
-  'A bot has at most 5 destinations and an account at most 20 (409).'
+  'A bot has at most 5 destinations and an account at most 20 (409). Events for one destination are delivered in order; a failed delivery is retried up to 8 times over about 20 minutes.'
+
+const URL_CHANGE_NOTE = 'If you change the URL to a different host, every existing header must be sent again with its value (the server answers 400 headers_reenter_required), so stored secrets can never be re-pointed at a new host.'
 
 const WRITE_SCOPE_NOTE = 'Needs write access to the bot\'s account (mcp:live for a live account, mcp:paper or mcp:live for paper).'
 
@@ -293,7 +295,7 @@ const dest = (botId: string, destinationId: string) => `${bot(botId)}/${encodeUR
 export function registerWebhookTools(server: McpServer) {
 
   server.tool('list_bot_webhooks',
-    'List a bot\'s outgoing webhook destinations: each one\'s id, name, URL, body template, header NAMES with a masked hint (header values are never returned), constants, which events it sends (open, close, paper), whether it is enabled (and why it was turned off, if it was) and its last delivery result. Read-only; any scope. Also says whether the account\'s plan allows webhooks and the limits. Get bot IDs from list_bots.',
+    'List a bot\'s outgoing webhook destinations: each one\'s id, name, URL, body template, header NAMES with a masked hint (header values are never returned), constants (with a read-only login the URL is shortened to its host and constant values are hidden), which events it sends (open, close, paper), whether it is enabled (and why it was turned off, if it was) and its last delivery result. Read-only; any scope. Also says whether the account\'s plan allows webhooks and the limits. Get bot IDs from list_bots.',
     { botId: botIdField },
     { title: 'List Bot Webhooks', readOnlyHint: true },
     withErrorHandling(async ({ botId }) => {
@@ -338,7 +340,7 @@ export function registerWebhookTools(server: McpServer) {
 
   server.tool('update_bot_webhook',
     'Change one of a bot\'s outgoing webhook destinations; only the fields you pass change. After the change the bot\'s trade events (opens and closes; paper only if includePaper) go to the (possibly new) URL, so confirm a new URL with the user. Headers are replaced as a COMPLETE list: a header you list without a value keeps its stored value (matched by name), a header you leave out is removed, and values are write-only (never shown). Constants are replaced as a complete set too. Setting enabled: true on a destination the server turned off (after 20 failed events) turns it back on. ' +
-    TEMPLATE_HELP + ' ' + WEBHOOK_PLAN_NOTE + ' ' + WRITE_SCOPE_NOTE + ' Sent once.',
+    URL_CHANGE_NOTE + ' ' + TEMPLATE_HELP + ' ' + WEBHOOK_PLAN_NOTE + ' ' + WRITE_SCOPE_NOTE + ' Sent once.',
     { botId: botIdField, destinationId: destIdField, ...webhookUpdateSchema.shape },
     { title: 'Update Bot Webhook', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     withErrorHandling(async ({ botId, destinationId, ...changes }) => {
