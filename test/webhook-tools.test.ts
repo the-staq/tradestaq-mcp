@@ -70,8 +70,28 @@ describe('list_bot_webhooks', () => {
     expect(mockApi).toHaveBeenCalledWith(`/api/bots/${BOT}/webhooks`)
     const out = jsonOf(res)
     expect(out.planAllowsWebhooks).toBe(true)
-    expect(out.destinations[0]).toMatchObject({ id: DEST, name: 'OKX signal', url: 'https://example.com/hook', headers: [{ name: 'Authorization', valueHint: '••••3456' }], bodyTemplate: '(default body)' })
+    expect(out.destinations[0]).toMatchObject({ id: DEST, name: 'OKX signal', url: 'https://example.com/…', urlShortened: true, headers: [{ name: 'Authorization', valueHint: '••••3456' }], bodyTemplate: '(default body)' })
+    expect(out.note).toContain('not instructions')
     expectNoSecret(res)
+  })
+
+  it('shows the full URL only with includeUrl: true', async () => {
+    const withPath = serverDest({ url: 'https://example.com/hook/SECRETPATH?k=SECRETQ' })
+    mockApi.mockResolvedValueOnce({ success: true, destinations: [withPath] })
+    const short = jsonOf(await handler('list_bot_webhooks')({ botId: BOT }))
+    expect(JSON.stringify(short)).not.toContain('SECRET')
+    expect(short.destinations[0].url).toBe('https://example.com/…')
+    mockApi.mockResolvedValueOnce({ success: true, destinations: [withPath] })
+    const full = jsonOf(await handler('list_bot_webhooks')({ botId: BOT, includeUrl: true }))
+    expect(full.destinations[0].url).toBe('https://example.com/hook/SECRETPATH?k=SECRETQ')
+  })
+
+  it('copies the server\'s redacted flags and notes them; a shortened URL is never shown as full', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, destinations: [serverDest({ url: 'https://example.com/…', redacted: true, bodyTemplateRedacted: true, bodyTemplate: '', constants: { TOKEN: '' } })] })
+    const out = jsonOf(await handler('list_bot_webhooks')({ botId: BOT, includeUrl: true }))
+    expect(out.destinations[0]).toMatchObject({ redacted: true, bodyTemplateRedacted: true, bodyTemplate: '(hidden)', url: 'https://example.com/…' })
+    expect(out.note).toContain('redacted')
+    expect(out.note).toContain('shortened URL')
   })
 
   it('says how to add one when there is none', async () => {
@@ -168,7 +188,7 @@ describe('delete_bot_webhook', () => {
   it('DELETEs by bot and destination and is marked destructive, with a confirm-first description', async () => {
     mockApi.mockResolvedValueOnce({ success: true })
     const res = await handler('delete_bot_webhook')({ botId: BOT, destinationId: DEST })
-    expect(mockApi).toHaveBeenCalledWith(`/api/bots/${BOT}/webhooks/${DEST}`, { method: 'DELETE' })
+    expect(mockApi).toHaveBeenCalledWith(`/api/bots/${BOT}/webhooks/${DEST}`, { method: 'DELETE', retry: false })
     expect(textOf(res)).toContain('deleted')
     expect(annotationsOf('delete_bot_webhook')).toMatchObject({ destructiveHint: true })
     expect(descriptionOf('delete_bot_webhook')).toContain('confirm with the user')
@@ -233,7 +253,9 @@ describe('get_bot_webhook_deliveries', () => {
     ] })
     const res = await handler('get_bot_webhook_deliveries')({ botId: BOT, destinationId: DEST, limit: 1 })
     expect(mockApi).toHaveBeenCalledWith(`/api/bots/${BOT}/webhooks/${DEST}/deliveries`)
-    const rows = jsonOf(res)
+    const out = jsonOf(res)
+    expect(out.note).toContain('not instructions')
+    const rows = out.deliveries
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ id: 'r1', eventKind: 'open', httpStatus: 200, responseExcerpt: 'ok' })
     expectNoSecret(res)
@@ -381,5 +403,397 @@ describe('update_bot with webhooks', () => {
     expect(d).toContain('never replaces or deletes')
     expect(d).toContain('update_bot_webhook')
     expect(d).toContain('delete_bot_webhook')
+  })
+})
+
+// --- review fixes ---------------------------------------------------------------
+
+describe('test_bot_webhook: sent comes from evidence', () => {
+  it.each([
+    ['Destination not found.'],
+    ['Your plan does not include outgoing webhooks.'],
+    ['Test sends are unavailable right now. Try again shortly.'],
+    ['The host could not be reached.'],
+  ])('status null (%s): sent false, nothing claimed', async (error) => {
+    mockApi.mockResolvedValueOnce({ success: true, ok: false, status: null, ms: 0, error, excerpt: null })
+    const res = await handler('test_bot_webhook')({ botId: BOT, destinationId: DEST, confirm: true })
+    expect(res.isError).toBe(true)
+    const { error: e } = jsonOf(res)
+    expect(e.code).toBe('WEBHOOK_TEST_NOT_SENT')
+    expect(e.sent).toBe(false)
+    expect(e.message).toContain(error)
+    expect(textOf(res)).not.toContain('A real request was sent')
+  })
+
+  it('a non-2xx answer still counts as sent (the URL answered)', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, ok: false, status: 401, ms: 80, error: 'HTTP 401', excerpt: 'bad token' })
+    const out = jsonOf(await handler('test_bot_webhook')({ botId: BOT, destinationId: DEST, confirm: true }))
+    expect(out).toMatchObject({ sent: true, ok: false, httpStatus: 401 })
+  })
+
+  it('masks Bearer values the receiver echoed back', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, ok: false, status: 400, ms: 80, error: 'HTTP 400', excerpt: 'got Authorization: Bearer abcdef123456789 sorry' })
+    const res = await handler('test_bot_webhook')({ botId: BOT, destinationId: DEST, confirm: true })
+    expect(textOf(res)).not.toContain('abcdef123456789')
+  })
+})
+
+describe('secret scrubbing', () => {
+  it('scrubs a value that straddles the 300-character cut', async () => {
+    const secret = 'ZZSECRETVALUEZZ'
+    const message = `${'x'.repeat(295)}${secret} tail`
+    mockApi.mockRejectedValueOnce(refusal(400, message, 'x'))
+    const res = await handler('add_bot_webhook')({ botId: BOT, name: 'x', url: 'https://example.com/h', headers: [{ name: 'X-Key', value: secret }] })
+    expect(textOf(res)).not.toContain('SECRET')
+    expect(textOf(res)).not.toContain('ZZSECRETV')
+  })
+
+  it('scrubs a short value only as a whole token', async () => {
+    mockApi.mockRejectedValueOnce(refusal(400, 'bad value 42 for header, count 142', 'x'))
+    const res = await handler('add_bot_webhook')({ botId: BOT, name: 'x', url: 'https://example.com/h', headers: [{ name: 'X-Key', value: '42' }] })
+    const msg = jsonOf(res).error.message
+    expect(msg).toContain('bad value [hidden] for header')
+    expect(msg).toContain('142')
+  })
+})
+
+describe('error contract', () => {
+  it.each([['busy', 409], ['unavailable', 503]])('%s means nothing was saved (not WEBHOOK_OUTCOME_UNKNOWN) and is safe to retry', async (code, status) => {
+    mockApi.mockRejectedValueOnce(refusal(status as number, 'Another change is in progress.', code as string))
+    const res = await handler('add_bot_webhook')({ botId: BOT, name: 'x', url: 'https://example.com/h' })
+    const { error } = jsonOf(res)
+    expect(error.code).toBe(code)
+    expect(error.retryable).toBe(true)
+    expect(error.message).toContain('Nothing was saved')
+  })
+
+  it('a webhook refused as "unavailable" in deploy_bot is not reported as maybe-created', async () => {
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockResolvedValueOnce({ doc: { id: 'new-bot', status: 'paused' } })
+      .mockRejectedValueOnce(refusal(503, 'Could not save right now.', 'unavailable'))
+    const res = await handler('deploy_bot')({ ...DEPLOY, webhooks: [{ name: 'a', url: 'https://example.com/h' }] })
+    expect(jsonOf(res).error.message).not.toContain('may already exist')
+  })
+
+  it('update_bot_webhook refuses a shortened URL before calling the API', async () => {
+    const res = await handler('update_bot_webhook')({ botId: BOT, destinationId: DEST, url: 'https://example.com/…' })
+    expect(jsonOf(res).error.code).toBe('INVALID_WEBHOOK')
+    expect(mockApi).not.toHaveBeenCalled()
+  })
+
+  it('the description says a read-only login cannot preview', () => {
+    expect(descriptionOf('preview_bot_webhook')).toContain('read-only login cannot preview')
+  })
+})
+
+describe('client-side checks run before any bot exists', () => {
+  const base = { ...DEPLOY }
+  it.each([
+    ['an unknown template variable', { name: 'a', url: 'https://example.com/h', bodyTemplate: '{"a":"{{nope}}"}' }, 'unknown variable'],
+    ['a const the constants do not define', { name: 'a', url: 'https://example.com/h', bodyTemplate: '{"a":"{{const.TOK}}"}', constants: { OTHER: '1' } }, '"TOK"'],
+    ['a blocked header name', { name: 'a', url: 'https://example.com/h', headers: [{ name: 'Content-Type', value: 'x' }] }, 'set by TradeStaq'],
+    ['an internal host', { name: 'a', url: 'https://localhost/h' }, 'public host'],
+    ['a port other than 443', { name: 'a', url: 'https://example.com:8443/h' }, '443'],
+  ])('deploy_bot refuses %s and creates nothing', async (_l, hook, text) => {
+    const res = await handler('deploy_bot')({ ...base, webhooks: [hook] })
+    expect(res.isError).toBe(true)
+    expect(jsonOf(res).error.code).toBe('INVALID_WEBHOOK')
+    expect(jsonOf(res).error.message).toContain(text)
+    expect(mockApi).not.toHaveBeenCalled()
+  })
+
+  it('update_bot refuses a bad webhook before reading or writing anything', async () => {
+    const res = await handler('update_bot')({ id: BOT, leverage: 2, webhooks: [{ name: 'a', url: 'https://example.com/h', bodyTemplate: '{{bad}}' }] })
+    expect(jsonOf(res).error.code).toBe('INVALID_WEBHOOK')
+    expect(mockApi).not.toHaveBeenCalled()
+  })
+
+  it('accepts a valid template with a defined const', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, destination: serverDest() })
+    const res = await handler('add_bot_webhook')({ botId: BOT, name: 'a', url: 'https://example.com/h', bodyTemplate: '{"t":"{{const.TOK}}","p":{{price}}}', constants: { TOK: 'x' } })
+    expect(res.isError).toBeUndefined()
+  })
+})
+
+describe('deploy_bot webhook flow edge cases', () => {
+  const HOOK = { name: 'OKX signal', url: 'https://example.com/hook', headers: [{ name: 'Authorization', value: SECRET }] }
+
+  it('a bot the server created RUNNING is paused before the webhooks are added', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
+      .mockResolvedValueOnce({ doc: { id: 'new-bot', status: 'active' } })
+      .mockResolvedValueOnce({ status: 'paused' }) // pause
+      .mockResolvedValueOnce({ success: true, destination: serverDest() })
+      .mockResolvedValueOnce({ status: 'active' }) // start
+    await handler('deploy_bot')({ ...DEPLOY, webhooks: [HOOK] })
+    expect(mockApi.mock.calls.map((c) => `${c[1]?.method ?? 'GET'} ${c[0]}`)).toEqual([
+      'GET /api/exchanges', 'POST /api/bots', 'PATCH /api/bots/new-bot/status', 'POST /api/bots/new-bot/webhooks', 'PATCH /api/bots/new-bot/status',
+    ])
+    expect(mockApi.mock.calls[2][1]).toEqual({ method: 'PATCH', retry: false, body: { status: 'paused' } })
+  })
+
+  it('if a RUNNING bot cannot be paused it says so and adds nothing', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
+      .mockResolvedValueOnce({ doc: { id: 'new-bot', status: 'active' } })
+      .mockRejectedValueOnce(new ApiError(500, 'HTTP_500', 'boom', false))
+    const res = await handler('deploy_bot')({ ...DEPLOY, webhooks: [HOOK] })
+    const { error } = jsonOf(res)
+    expect(error.code).toBe('BOT_RUNNING_WITHOUT_WEBHOOKS')
+    expect(error.message).toContain('RUNNING')
+    expect(error.message).toContain('stop_bot')
+    expect(mockApi).toHaveBeenCalledTimes(3)
+  })
+
+  it('a webhook failure is not retryable and starts with "Do NOT call deploy_bot again"', async () => {
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockResolvedValueOnce({ doc: { id: 'new-bot', status: 'paused' } })
+      .mockRejectedValueOnce(refusal(403, 'Your current plan does not include outgoing webhooks.', 'plan_required'))
+    const { error } = jsonOf(await handler('deploy_bot')({ ...DEPLOY, webhooks: [HOOK] }))
+    expect(error.retryable).toBe(false)
+    expect(error.message.startsWith('Do NOT call deploy_bot again')).toBe(true)
+    expect(error.message).toContain('status is PAUSED')
+  })
+
+  it('a webhook failure with start: false says it was not started as asked', async () => {
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockResolvedValueOnce({ doc: { id: 'new-bot', status: 'paused' } })
+      .mockRejectedValueOnce(refusal(409, 'A bot can have at most 5 webhook destinations.', 'limit_per_bot'))
+    const res = await handler('deploy_bot')({ ...DEPLOY, start: false, webhooks: [HOOK] })
+    expect(jsonOf(res).error.message).toContain('as you asked')
+    expect(mockApi).toHaveBeenCalledTimes(3)
+  })
+
+  it('DEPLOY_OUTCOME_UNKNOWN with webhooks says the bot has no webhook yet', async () => {
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockRejectedValueOnce(new ApiError(408, 'TIMEOUT', 'Request timed out', false))
+    const { error } = jsonOf(await handler('deploy_bot')({ ...DEPLOY, webhooks: [HOOK] }))
+    expect(error.code).toBe('DEPLOY_OUTCOME_UNKNOWN')
+    expect(error.message).toContain('has no webhook yet')
+    expect(error.message).toContain('add_bot_webhook')
+    expect(mockApi).toHaveBeenCalledTimes(2)
+  })
+
+  it('PRESET_UNSUPPORTED with webhooks says the webhooks were NOT added, and the bot is not started', async () => {
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockResolvedValueOnce({ doc: { id: 'new-bot', status: 'paused' } })
+    const res = await handler('deploy_bot')({ ...DEPLOY, presetId: 'p', webhooks: [HOOK] })
+    const { error } = jsonOf(res)
+    expect(error.code).toBe('PRESET_UNSUPPORTED')
+    expect(error.message).toContain('webhooks were NOT added')
+    expect(mockApi).toHaveBeenCalledTimes(2)
+  })
+
+  it('a start the server refuses after the webhooks went in leaves the bot paused and says so', async () => {
+    mockApi
+      .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
+      .mockResolvedValueOnce({ doc: { id: 'new-bot', status: 'paused' } })
+      .mockResolvedValueOnce({ success: true, destination: serverDest() })
+      .mockRejectedValueOnce(new ApiError(409, 'HTTP_409', 'Another bot already trades that coin', false))
+    const res = await handler('deploy_bot')({ ...DEPLOY, webhooks: [HOOK] })
+    const text = textOf(res)
+    expect(text).toContain('NOT started')
+    expect(text).toContain('Another bot already trades that coin')
+    expect(text).toContain('Webhooks: 1 destination added')
+  })
+})
+
+describe('update_bot with webhooks: edge cases', () => {
+  it('PRESET_UNSUPPORTED says the webhooks were NOT added', async () => {
+    mockApi
+      .mockResolvedValueOnce({ id: BOT, triggerType: 'strategy', strategy: STRATEGY })
+      .mockResolvedValueOnce({ success: true }) // PATCH without appliedPreset
+    const res = await handler('update_bot')({ id: BOT, presetId: 'p', webhooks: [{ name: 'a', url: 'https://example.com/h' }] })
+    const { error } = jsonOf(res)
+    expect(error.code).toBe('PRESET_UNSUPPORTED')
+    expect(error.message).toContain('webhooks were NOT added')
+    expect(mockApi.mock.calls.some((c) => String(c[0]).endsWith('/webhooks'))).toBe(false)
+  })
+
+  it('the failure result carries the PATCH warnings', async () => {
+    mockApi
+      .mockResolvedValueOnce({ id: BOT, positionSizing: { type: 'percentage', value: 10, leverage: 1 } })
+      .mockResolvedValueOnce({ success: true, warnings: ['Not enough candle history'] })
+      .mockRejectedValueOnce(refusal(403, 'Your current plan does not include outgoing webhooks.', 'plan_required'))
+    const { error } = jsonOf(await handler('update_bot')({ id: BOT, leverage: 3, webhooks: [{ name: 'a', url: 'https://example.com/h' }] }))
+    expect(error.warnings).toEqual(['Not enough candle history'])
+    expect(error.retryable).toBe(false)
+    expect(error.message.startsWith('Do NOT repeat')).toBe(true)
+  })
+})
+
+// --- through a real MCP client: the zod schemas and annotations actually run ----------
+
+describe('through an MCP client', () => {
+  async function client() {
+    const { McpServer: S } = await import('@modelcontextprotocol/sdk/server/mcp.js')
+    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js')
+    const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js')
+    const server = new S({ name: 't', version: '1' }, { capabilities: { logging: {} } })
+    registerWebhookTools(server)
+    registerBotTools(server)
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    const c = new Client({ name: 'c', version: '1' })
+    await Promise.all([server.connect(a), c.connect(b)])
+    return c
+  }
+  const call = async (c: any, name: string, args: Record<string, unknown>) => {
+    const r: any = await c.callTool({ name, arguments: args })
+    return { isError: !!r.isError, text: r.content[0].text as string }
+  }
+
+  it('rejects an http URL, a bad header name, a non-ASCII header value and too many constants or webhooks, and calls nothing', async () => {
+    const c = await client()
+    const ok = { botId: BOT, name: 'a', url: 'https://example.com/h' }
+    const bad: Array<[string, Record<string, unknown>]> = [
+      ['add_bot_webhook', { ...ok, url: 'http://example.com/h' }],
+      ['add_bot_webhook', { ...ok, headers: [{ name: 'Bad Name', value: 'x' }] }],
+      ['add_bot_webhook', { ...ok, headers: [{ name: 'X-Key', value: 'café' }] }],
+      ['add_bot_webhook', { ...ok, headers: [{ name: 'X-Key', value: 'line\nbreak' }] }],
+      ['add_bot_webhook', { ...ok, constants: Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`C${i}`, 'v'])) }],
+      ['add_bot_webhook', { ...ok, constants: { 'bad-name': 'v' } }],
+      ['deploy_bot', { ...DEPLOY, webhooks: Array.from({ length: 6 }, (_, i) => ({ name: `w${i}`, url: 'https://example.com/h' })) }],
+      ['test_bot_webhook', { botId: BOT, destinationId: DEST }],
+    ]
+    for (const [name, args] of bad) {
+      const r = await call(c, name, args)
+      expect(r.isError, `${name} ${JSON.stringify(args).slice(0, 60)}`).toBe(true)
+      expect(r.text).toContain('Input validation error')
+    }
+    expect(mockApi).not.toHaveBeenCalled()
+  })
+
+  it('accepts a valid add and sends it', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, destination: serverDest() })
+    const c = await client()
+    const r = await call(c, 'add_bot_webhook', { botId: BOT, name: 'a', url: 'https://example.com/h', headers: [{ name: 'Authorization', value: SECRET }] })
+    expect(r.isError).toBe(false)
+    expect(r.text).not.toContain('SUPERSECRET')
+  })
+
+  it('publishes the annotations the descriptions promise', async () => {
+    const c = await client()
+    const { tools } = await c.listTools()
+    const ann = (n: string) => tools.find((t) => t.name === n)!.annotations as any
+    expect(ann('delete_bot_webhook').destructiveHint).toBe(true)
+    expect(ann('update_bot').idempotentHint).toBe(false)
+    expect(ann('list_bot_webhooks').readOnlyHint).toBe(true)
+    expect(ann('preview_bot_webhook').readOnlyHint).toBe(true)
+    expect(ann('test_bot_webhook').readOnlyHint).toBe(false)
+    const confirm = (tools.find((t) => t.name === 'test_bot_webhook')!.inputSchema as any)
+    expect(confirm.required).toContain('confirm')
+  })
+})
+
+// --- secrets, copy bots, delivery notes ------------------------------------------
+
+describe('secrets (write-only body values)', () => {
+  const TOKEN = 'OKXTOKEN-very-secret-9876'
+
+  it('add_bot_webhook sends secrets once and never echoes a value; the view shows name and hint only', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, destination: serverDest({ secrets: [{ name: 'OKX_TOKEN', valueHint: '••••9876', value: TOKEN }] }) })
+    const input = { name: 'a', url: 'https://example.com/h', bodyTemplate: '{"t":"{{secret.OKX_TOKEN}}"}', secrets: [{ name: 'OKX_TOKEN', value: TOKEN }] }
+    const res = await handler('add_bot_webhook')({ botId: BOT, ...input })
+    expect(mockApi).toHaveBeenCalledWith(`/api/bots/${BOT}/webhooks`, { method: 'POST', retry: false, body: input })
+    expect(jsonOf(res).destination.secrets).toEqual([{ name: 'OKX_TOKEN', valueHint: '••••9876' }])
+    expect(textOf(res)).not.toContain(TOKEN)
+  })
+
+  it('a secret value is scrubbed from a server error', async () => {
+    mockApi.mockRejectedValueOnce(refusal(400, `Bad secret ${TOKEN}`, 'x'))
+    const res = await handler('add_bot_webhook')({ botId: BOT, name: 'a', url: 'https://example.com/h', secrets: [{ name: 'OKX_TOKEN', value: TOKEN }] })
+    expect(textOf(res)).not.toContain(TOKEN)
+  })
+
+  it('update_bot_webhook: a secret without a value keeps its stored one (sent by name only)', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, destination: serverDest() })
+    await handler('update_bot_webhook')({ botId: BOT, destinationId: DEST, secrets: [{ name: 'OKX_TOKEN' }, { name: 'OTHER', value: TOKEN }] })
+    expect(mockApi.mock.calls[0][1].body).toEqual({ secrets: [{ name: 'OKX_TOKEN' }, { name: 'OTHER', value: TOKEN }] })
+  })
+
+  it('deploy_bot refuses {{secret.X}} without that secret, and a duplicate secret, before creating a bot', async () => {
+    for (const hook of [
+      { name: 'a', url: 'https://example.com/h', bodyTemplate: '{"t":"{{secret.NOPE}}"}', secrets: [{ name: 'OTHER', value: 'v' }] },
+      { name: 'a', url: 'https://example.com/h', secrets: [{ name: 'A', value: 'v' }, { name: 'A', value: 'w' }] },
+    ]) {
+      const res = await handler('deploy_bot')({ ...DEPLOY, webhooks: [hook] })
+      expect(jsonOf(res).error.code).toBe('INVALID_WEBHOOK')
+    }
+    expect(mockApi).not.toHaveBeenCalled()
+  })
+
+  it('deploy_bot and update_bot pass secrets through to the webhook POST and keep them out of results', async () => {
+    const hook = { name: 'a', url: 'https://example.com/h', bodyTemplate: '{"t":"{{secret.OKX_TOKEN}}"}', secrets: [{ name: 'OKX_TOKEN', value: TOKEN }] }
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockResolvedValueOnce({ doc: { id: 'new-bot', status: 'paused' } })
+      .mockResolvedValueOnce({ success: true, destination: serverDest() }).mockResolvedValueOnce({ status: 'active' })
+    const r1 = await handler('deploy_bot')({ ...DEPLOY, webhooks: [hook] })
+    expect(mockApi.mock.calls[2][1].body).toEqual(hook)
+    expect(textOf(r1)).not.toContain(TOKEN)
+    mockApi.mockReset()
+    mockApi.mockResolvedValueOnce({ success: true, destination: serverDest() })
+    const r2 = await handler('update_bot')({ id: BOT, webhooks: [hook] })
+    expect(mockApi.mock.calls[0][1].body).toEqual(hook)
+    expect(textOf(r2)).not.toContain(TOKEN)
+  })
+
+  it('rejects bad secret names and values through the real schema', async () => {
+    const { McpServer: S } = await import('@modelcontextprotocol/sdk/server/mcp.js')
+    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js')
+    const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js')
+    const server = new S({ name: 't', version: '1' }, { capabilities: { logging: {} } })
+    registerWebhookTools(server)
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    const c = new Client({ name: 'c', version: '1' })
+    await Promise.all([server.connect(a), c.connect(b)])
+    const ok = { botId: BOT, name: 'a', url: 'https://example.com/h' }
+    for (const secrets of [
+      [{ name: 'lower', value: 'v' }],
+      [{ name: '1BAD', value: 'v' }],
+      [{ name: 'OK', value: 'café' }],
+      [{ name: 'OK', value: 'x'.repeat(501) }],
+      Array.from({ length: 11 }, (_, i) => ({ name: `S${i}`, value: 'v' })),
+    ]) {
+      const r: any = await c.callTool({ name: 'add_bot_webhook', arguments: { ...ok, secrets } })
+      expect(r.isError).toBe(true)
+    }
+    expect(mockApi).not.toHaveBeenCalled()
+  })
+
+  it('describes {{secret.NAME}}, price_known and keeps tokens out of constants', () => {
+    const d = descriptionOf('add_bot_webhook')
+    expect(d).toContain('{{secret.NAME}}')
+    expect(d).toContain('{{price_known}}')
+    expect(d).toContain('NEVER in constants')
+  })
+})
+
+describe('server refusals and delivery notes', () => {
+  it('headers_reenter_required is explained: re-send every header and secret', async () => {
+    mockApi.mockRejectedValueOnce(refusal(400, 'You changed the URL host, so the saved header values cannot be reused.', 'headers_reenter_required'))
+    const res = await handler('update_bot_webhook')({ botId: BOT, destinationId: DEST, url: 'https://other.example.com/h' })
+    const { error } = jsonOf(res)
+    expect(error.code).toBe('headers_reenter_required')
+    expect(error.message).toContain('EVERY header and EVERY secret')
+    expect(descriptionOf('update_bot_webhook')).toContain('header AND secret')
+  })
+
+  it('not_available_for_copy_bots is explained, in add_bot_webhook and in deploy_bot', async () => {
+    mockApi.mockRejectedValueOnce(refusal(403, 'Copy-follower bots cannot send webhooks.', 'not_available_for_copy_bots'))
+    const res = await handler('add_bot_webhook')({ botId: BOT, name: 'a', url: 'https://example.com/h' })
+    expect(jsonOf(res).error.code).toBe('not_available_for_copy_bots')
+    expect(jsonOf(res).error.message).toContain('copy-follower')
+
+    mockApi.mockReset()
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockResolvedValueOnce({ doc: { id: 'new-bot', status: 'paused' } })
+      .mockRejectedValueOnce(refusal(403, 'Copy-follower bots cannot send webhooks.', 'not_available_for_copy_bots'))
+    const dep = await handler('deploy_bot')({ ...DEPLOY, webhooks: [{ name: 'a', url: 'https://example.com/h' }] })
+    expect(jsonOf(dep).error.message).toContain('Copy-follower bots cannot send webhooks')
+    expect(jsonOf(dep).error.code).toBe('WEBHOOK_SETUP_FAILED')
+  })
+
+  it('add and test descriptions state at-least-once delivery, event_id dedupe, orphan exits and the 5 minute drop', () => {
+    for (const name of ['add_bot_webhook', 'test_bot_webhook']) {
+      const d = descriptionOf(name)
+      expect(d).toContain('at least once')
+      expect(d).toContain('X-TradeStaq-Event-Id')
+      expect(d).toContain('position the receiver does not hold')
+      expect(d).toContain('older than 5 minutes')
+    }
+    expect(descriptionOf('add_bot_webhook')).toContain('not_available_for_copy_bots')
   })
 })

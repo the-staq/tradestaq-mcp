@@ -109,6 +109,7 @@ Credentials never enter the chat when using the browser flow. Token is stored lo
 | `get_price` | Current price, 24h change, volume |
 | `get_candles` | OHLCV candlestick data (1m to 1d) |
 | `list_exchanges` | List connected exchange accounts |
+| `create_paper_exchange` | Create a paper-trading exchange with a simulated balance (no API keys) |
 | `search_markets` | Find trading pairs on a specific exchange |
 
 ### Portfolio
@@ -128,6 +129,14 @@ Credentials never enter the chat when using the browser flow. Token is stored lo
 | `compare_strategies` | Side-by-side metrics comparison |
 | `create_strategy` | Create a strategy from TradeDroid code |
 | `generate_strategy` | Generate a strategy from natural language using AI |
+| `update_strategy` | Edit one of your strategies: metadata and/or code (code writes a draft version; bots keep running the stable one) |
+| `list_strategy_versions` | A strategy's version history with validation status and the channel each version serves |
+| `validate_strategy_version` | Run the validation pipeline on a strategy's latest draft version (async) |
+| `promote_strategy_version` | Promote a validated version to the stable or beta channel (stable changes what live bots run; needs `mcp:live`) |
+| `start_optimization_run` | Start a Strategy Lab run that improves one of your strategies (costs wallet money: estimate first, then confirm) |
+| `get_optimization_status` | Progress and result of a Strategy Lab run |
+| `send_optimization_guidance` | Steer a running Strategy Lab run with free-text guidance |
+| `cancel_optimization_run` | Cancel a Strategy Lab run (the best version found so far is kept, held) |
 
 ### Backtesting
 
@@ -135,6 +144,7 @@ Credentials never enter the chat when using the browser flow. Token is stored lo
 |------|-------------|
 | `what_if_backtest` | Run a historical backtest (async, 30-120s) |
 | `get_backtest_results` | Check status of a running backtest |
+| `export_backtest` | CSV and PDF download links for a finished backtest |
 
 ### Bot Management
 
@@ -149,6 +159,7 @@ Credentials never enter the chat when using the browser flow. Token is stored lo
 | `stop_bot` | Stop a running bot now (open positions are left unmanaged) |
 | `delete_bot` | Delete a bot (refused while it has an open trade) |
 | `close_position` | Close an open position (full or partial) |
+| `export_bot_trades` | A bot's closed trades with entry/exit prices and PnL, plus a performance summary |
 | `list_bot_share_links` | A bot's public chart links (tradestaq.com/chart/...) |
 | `create_bot_share_link` | Make a public link to a bot's live chart (choose expiry and whether PnL shows) |
 | `revoke_bot_share_link` | Turn a public chart link off |
@@ -175,9 +186,11 @@ For example, switching a paused 15m GhostRider bot to Trade Wind on 4h with its 
 A bot can send every trade it opens or closes to a URL you choose, for example a signal-bot endpoint on an exchange or your own service. Each event is an HTTP POST with a JSON body you shape with a template (`{{action}}`, `{{symbol}}`, `{{price}}`, `{{size}}`, `{{pnl}}`, `{{const.NAME}}` and more; `add_bot_webhook` lists them all) and the headers you set.
 
 - Add one with `add_bot_webhook`, or give `deploy_bot` / `update_bot` a `webhooks` array. With `deploy_bot` the destinations are added while the bot is still paused and the bot is started afterwards, so its first trade is not missed. If a destination is refused, the bot is kept, left paused, and the reply says which webhook failed and why. `update_bot` only ever adds; use `update_bot_webhook` and `delete_bot_webhook` to change or remove one.
-- Header values (tokens) are write-only: they are encrypted, never shown again and never repeated by the tools. Put secrets in headers, not in the URL. Constants are shown in plain text.
+- Secrets for the body (`secrets`, used as `{{secret.NAME}}`) are write-only like header values: encrypted, never shown again, never repeated by the tools. Constants are plain text, so tokens go in `secrets` or headers. Changing a URL's host needs every header and secret sent again.
+- Header values (tokens) are write-only: they are encrypted, never shown again and never repeated by the tools in anything they send or the server returns (a receiver that echoes a token in its response can still show it in `test_bot_webhook` or the delivery log; recognisable `Bearer ...` values are masked). Put secrets in headers, not in the URL. Constants are shown in plain text.
 - Check the body with `preview_bot_webhook` first: it renders a sample trade and sends nothing. `test_bot_webhook` sends a real request, and a trading service may act on it, so it needs `confirm: true` and the user's agreement.
 - Paper trades are only sent when `includePaper` is true. The server turns a destination off after 20 failed events in a row; `get_bot_webhook_deliveries` shows why.
+- Delivery is at least once: dedupe on `event_id` (also the `X-TradeStaq-Event-Id` header). An exit can arrive for a position the receiver does not hold, and an open older than 5 minutes is dropped. Bots that copy another trader cannot have webhooks.
 - Needs a TradeStaq plan with signal forwarding (otherwise the server answers 403) and the write scope of the bot's account (`mcp:live` for a live bot). Reading and the delivery log work with any scope. A bot has up to 5 destinations.
 
 ### Trade History

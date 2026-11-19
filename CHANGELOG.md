@@ -2,11 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+- The tool count stated in the README and `package.json` was already out of date (46; the server had 49). It now says 56: the 49 that existed plus the seven webhook tools. The README tool tables list every tool, including 11 that were missing.
+
 ### Added
 - **Outgoing webhooks for bots:** `list_bot_webhooks`, `add_bot_webhook`, `update_bot_webhook`, `delete_bot_webhook`, `preview_bot_webhook`, `test_bot_webhook` and `get_bot_webhook_deliveries`. A bot's trade opens and closes (paper trades only with `includePaper`) are POSTed to an https URL with a JSON body from a template (`{{action}}`, `{{symbol}}`, `{{price}}`, `{{const.NAME}}`, and more) and custom headers.
-  - Header values are write-only: never returned, never repeated in a result or an error (only the name and a masked hint). Creates, edits and tests are sent once, with no resend after a timeout.
+  - Header values are write-only: the tools never repeat a value they sent or the server returned (only the name and a masked hint are shown). A receiver that echoes a token in its response can still show it in a test result or the delivery log; recognisable `Bearer ...` values are masked there. Creates, edits and tests are sent once, with no resend after a timeout.
   - `test_bot_webhook` sends a real request to the URL and needs `confirm: true`; `preview_bot_webhook` renders the body with a sample trade and sends nothing.
   - `deploy_bot` takes a `webhooks` array. The bot is then created paused, the destinations are added, and the bot is started last (unless `start: false`). If a destination is refused the bot is kept but not started, nothing is retried, and the reply names the failed webhook. `update_bot` takes a `webhooks` array too: it only adds destinations (never replaces or removes), and a webhooks-only call is allowed.
+  - Destinations take `secrets` (`[{name, value}]`, names like `OKX_TOKEN`, used in the body as `{{secret.NAME}}`): write-only like header values, listed by name and masked hint only. On update, a secret listed without a value keeps its stored value; the list is the complete set. Changing the URL host requires every header and secret to be sent again (the server's `headers_reenter_required` is explained). The template variable `price_known` is documented.
+  - Copy-follower bots cannot have webhooks (403 `not_available_for_copy_bots`); the descriptions also state at-least-once delivery (dedupe on `event_id` / `X-TradeStaq-Event-Id`), that an exit can arrive for a position the receiver does not hold, and that an open older than 5 minutes is dropped.
+  - URLs are listed as scheme and host only unless `includeUrl: true` is passed to `list_bot_webhooks`. A read-only login sees shortened URLs and hidden constant values (the server redacts them).
+  - `deploy_bot` and `update_bot` check the webhooks client-side first (https URL, template variables, header names and values), so a bad webhook does not leave a new bot behind. A webhook failure answers `WEBHOOK_SETUP_FAILED` (not retryable: do not call `deploy_bot` again).
+  - `update_bot`'s `idempotentHint` annotation changed from `true` to `false`, because a call with `webhooks` adds destinations each time.
   - **Needs the TradeStaq release that ships outgoing webhooks** (the `/api/bots/[id]/webhooks` routes) and a plan with signal forwarding (`allowSignalForwarding`); otherwise the server answers 403/404. Writes need the write scope of the bot's account (`mcp:live` for a live bot); listing and the delivery log need any scope.
 
 ## [0.8.0] - 2026-11-12
