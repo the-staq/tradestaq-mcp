@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { api, ApiError } from '../api.js'
 import { closedTrades } from '../closed-trades.js'
-import { errorResult, jsonResult, noAnswerReason, withErrorHandling } from '../helpers.js'
-import { addWebhooksToBot, assertWebhooksValid, webhookFailureResult, webhookInputSchema, webhookSummaryLines, webhookSummaryView, type WebhookOutcome } from './webhooks.js'
+import { endSentence, errorResult, jsonResult, noAnswerReason, withErrorHandling } from '../helpers.js'
+import { addWebhooksToBot, assertWebhooksValid, webhookFailureResult, webhookInputSchema, webhooksNotAddedError, webhookSummaryLines, webhookSummaryView, type WebhookOutcome } from './webhooks.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 // The Bots collection has NO top-level isPaper/paperTrading field -- whether a
@@ -13,6 +13,29 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 // there, never from a bot-level field that doesn't exist.
 function primaryExchangeOf(bot: any): any {
   return (bot.exchanges || [])[0]
+}
+
+/**
+ * update_bot's handler, wrapped: an error before its first webhook is sent (the bot read, a
+ * refusal, the PATCH) means none of the call's webhooks was added, and the error says so.
+ */
+function noteWebhooksNotAdded<A extends { id: string, webhooks?: unknown[] }>(
+  handler: (args: A, progress: { webhooksAttempted: boolean }) => Promise<any>,
+): (args: A) => Promise<any> {
+  return async (args: A) => {
+    const progress = { webhooksAttempted: false }
+    try {
+      return await handler(args, progress)
+    } catch (err) {
+      throw args.webhooks?.length && !progress.webhooksAttempted ? webhooksNotAddedError(err, args.id) : err
+    }
+  }
+}
+
+/** Whether the bot trades on a paper account, when the bot read says so (undefined: not known). */
+function botIsPaper(bot: any): boolean | undefined {
+  const isPaper = primaryExchangeOf(bot ?? {})?.isPaper
+  return typeof isPaper === 'boolean' ? isPaper : undefined
 }
 
 function strategyNameOf(bot: any): string | undefined {
@@ -422,7 +445,8 @@ export function registerBotTools(server: McpServer) {
     'deploy_bot',
     'Deploy a strategy as a trading bot. Defaults to paper trading for safety — whether a bot trades real money is determined entirely by the exchange account it\'s attached to (not by the `live` flag alone), so this refuses to deploy if `live` doesn\'t match the target exchange\'s own paper/live status. Check an exchange\'s status with list_exchanges first, or create one with create_paper_exchange. The bot trades on the strategy\'s own timeframe unless you pass `timeframe`; omit `name` and the server names it.\n\n' +
     'The bot STARTS TRADING when it is created, so give it its settings here, not in a later update_bot: `presetId` (a bot preset\'s ID or slug, e.g. "smart-accumulator-smart-dca": its parameters, timeframe, execution mode and version; it must belong to `strategyId`), `parameterOverrides` and `executionMode`. They are applied by the server in the same create, so the bot\'s first run already uses them and every plan, same-coin and history check runs on the final settings. With a preset the bot is created paused and then started, so it never runs without the preset; a start the server refuses (e.g. another bot already trades that coin on the account) leaves it paused and the reply says why. Pass `start: false` to create it paused (start it later with start_bot).\n\n' +
-    'Webhooks (`webhooks`): outgoing webhook destinations for the bot\'s trade events (opens and closes; paper only with includePaper), same fields as add_bot_webhook (read its description for the template variables; needs a plan with signal forwarding and write access to the account). With `webhooks` the bot is created PAUSED, the destinations are added, and only then is it started (unless `start: false`), so its first trade is never missed. If a destination cannot be added, the bot is NOT retried, NOT deleted and NOT started (a bot meant to send signals must not trade unobserved): the reply says the bot exists, which webhook failed and why; fix it with add_bot_webhook, then start_bot. Confirm each URL with the user first; header and secret values are write-only (put tokens in `secrets`, used as {{secret.NAME}}; copy-follower bots cannot have webhooks) and never shown.',
+    'Webhooks (`webhooks`): outgoing webhook destinations for the bot\'s trade events, same fields as add_bot_webhook (read its description for the template variables; needs write access to the account). A PAPER bot (the default here) sends nothing to a destination without includePaper: true; never set includePaper for a URL that places real orders. With `webhooks` the bot is created PAUSED, the destinations are added, and only then is it started (unless `start: false`), so its first trade is never missed. ' +
+    'Before the bot is created each webhook is checked against the server\'s own rules (https URL on port 443, no TradeStaq, private or reserved address, header and secret names and values, template variables, valid JSON, at most 16 KB): a webhook those rules refuse creates nothing. Some refusals can only come AFTER the bot exists: a plan without signal forwarding (e.g. the Free plan: 403 plan_required), the account\'s destination limits and other server-side refusals. Then the bot is NOT retried, NOT deleted and NOT started: it stays PAUSED (a bot meant to send signals must not trade unobserved) and the reply says it exists, which webhook failed and why; delete it with delete_bot, or fix the cause, add the webhooks with add_bot_webhook and start it with start_bot. Confirm each URL with the user first; header and secret values are write-only (put tokens in `secrets`, used as {{secret.NAME}}; copy-follower bots cannot have webhooks) and never shown.',
     {
       strategyId: z.string().describe('Strategy ID to deploy'),
       exchangeId: z.string().describe('Exchange account ID. Its own isPaper status (see list_exchanges) determines whether this bot trades real money — must match the `live` flag below.'),
@@ -439,11 +463,15 @@ export function registerBotTools(server: McpServer) {
       parameterOverrides: z.record(z.string().regex(PARAM_KEY_RE), PARAM_VALUE).optional().describe('Strategy parameters, e.g. {"BUY_AMOUNT": 50}. With presetId they go on top of the preset\'s, and a null removes one of the preset\'s so the strategy default runs.'),
       executionMode: z.enum(EXECUTION_MODES).optional().describe('"on_bar_close" (what backtests simulate) or "continuous". Omit for the preset\'s, else the server default.'),
       start: z.boolean().default(true).describe('true (default): the bot starts trading once created. false: it is created paused; start it with start_bot.'),
-      webhooks: z.array(webhookInputSchema).max(5).optional().describe('Outgoing webhook destinations to add to the bot BEFORE it starts (up to 5), each with name, url (https), bodyTemplate, headers, secrets, constants, onOpen, onClose, includePaper, enabled: the same fields as add_bot_webhook. Confirm the URLs with the user; put tokens in `secrets` or header values (both write-only).'),
+      webhooks: z.array(webhookInputSchema).max(5).optional().describe('Outgoing webhook destinations to add to the bot BEFORE it starts (up to 5), each with name, url (https), bodyTemplate, headers, secrets, constants, onOpen, onClose, includePaper, enabled: the same fields as add_bot_webhook. A paper bot sends nothing to a destination without includePaper: true. Confirm the URLs with the user; put tokens in `secrets` or header values (both write-only).'),
     },
+    // Not idempotent (each call creates a bot) and destructive: the bot trades, with real money on a live account.
+    { title: 'Deploy Bot', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     withErrorHandling(async ({ strategyId, exchangeId, symbol, market, name, timeframe, live, positionSizePercent, leverage, stopLoss, takeProfit, presetId, parameterOverrides, executionMode, start, webhooks }) => {
-      // What the server would refuse only after the bot exists is checked first, so a bad
-      // webhook never leaves an orphan bot behind.
+      // The server's own rules for a webhook (URL, addresses, headers, secrets, template) are
+      // checked before anything is created, so those mistakes create no bot. The plan and the
+      // account's limits can only be refused by the server once the bot exists: it then stays
+      // paused and the reply says so (webhookFailureResult).
       assertWebhooksValid(webhooks)
       // The server enforces paper/live via OAuth scope tied to the target
       // exchange's real isPaper flag, but that surfaces as an opaque 403.
@@ -589,7 +617,7 @@ export function registerBotTools(server: McpServer) {
           if (reason) status = 'unknown'
           notStarted = reason
             ? `The start request got no answer (${reason}), so it may or may not be running: check get_bot_status before calling start_bot.`
-            : `The start was refused${err instanceof ApiError && err.code ? ` (${err.code})` : ''}: ${capText(err instanceof Error ? err.message : String(err), 300) ?? 'no reason given'}. It stays paused: fix that and start it with start_bot, or delete it.`
+            : `The start was refused${err instanceof ApiError && err.code ? ` (${err.code})` : ''}: ${endSentence(capText(err instanceof Error ? err.message : String(err), 300) ?? 'no reason given')} It stays paused: fix that and start it with start_bot, or delete it.`
         }
       }
 
@@ -600,7 +628,7 @@ export function registerBotTools(server: McpServer) {
       lines.push(notStarted
         ? `Status: ${status}, NOT started. ${notStarted}`
         : `Status: ${running ? 'running' : `${status} (start it with start_bot)`}`)
-      if (webhookOutcome) lines.push(...webhookSummaryLines(webhookOutcome))
+      if (webhookOutcome) lines.push(...webhookSummaryLines(webhookOutcome, webhooks!, exchangeIsPaper))
       const createWarnings = serverWarnings(data)
       for (const w of [...createWarnings, ...startWarnings.filter((w) => !createWarnings.includes(w))]) lines.push(`Warning: ${w}`)
       lines.push(exchangeIsPaper
@@ -617,7 +645,7 @@ export function registerBotTools(server: McpServer) {
     'Strategy switch (strategyId) and timeframe change need the bot to be FLAT: no open position and no working order. A bot that holds one is refused (OPEN_POSITION) and nothing is changed, because the new strategy would adopt a position it did not open (e.g. a long-only strategy inheriting a short). Pause it first with stopAfterClose:true (it keeps managing the position, opens nothing new and pauses once flat), wait until get_bot_status shows no openPosition, then switch. A switch starts the strategy state over and drops the old strategy\'s parameters, preset and stale owed exits; the new strategy runs its stable channel unless you pass versionChannel / pinnedVersionId. The bot keeps its status: a paused bot stays paused until you start_bot it.\n\n' +
     'Preset (presetId): applies it as the dashboard does when you pick one: its strategy, parameter overrides, timeframe, execution mode / interval and version, with anything you pass explicitly on top. The same flat rule applies when it changes the strategy or timeframe.\n\n' +
     'Scope: editing a paper bot needs mcp:paper; any change to a LIVE bot (rename, strategy, timeframe, parameters, risk) needs mcp:live. The server enforces it (INSUFFICIENT_SCOPE).\n\n' +
-    'Webhooks (`webhooks`): ADDS outgoing webhook destinations to the bot (same fields as add_bot_webhook; read its description for the template variables). It never replaces or deletes the destinations the bot already has: use update_bot_webhook to change one and delete_bot_webhook to remove one. Applied after the other changes in this call: if a destination is refused, the other changes stay saved, nothing is retried and the reply says which webhook failed and why. Needs a plan with signal forwarding; confirm the URLs with the user (the bot\'s trade events go there), header and secret values are write-only (put tokens in `secrets`, used as {{secret.NAME}}; copy-follower bots cannot have webhooks). A webhooks-only call is allowed.\n\n' +
+    'Webhooks (`webhooks`): ADDS outgoing webhook destinations to the bot (same fields as add_bot_webhook; read its description for the template variables). It never replaces or deletes the destinations the bot already has: use update_bot_webhook to change one and delete_bot_webhook to remove one. Applied after the other changes in this call: if a destination is refused, the other changes stay saved, nothing is retried and the reply says which webhook failed and why; if the bot change itself fails, no webhook is added and the error says so. A bot on a paper account sends nothing to a destination without includePaper: true (never set it for a URL that places real orders). Needs a plan with signal forwarding; confirm the URLs with the user (the bot\'s trade events go there), header and secret values are write-only (put tokens in `secrets`, used as {{secret.NAME}}; copy-follower bots cannot have webhooks). A webhooks-only call is allowed.\n\n' +
     'Returns the resulting config (strategy, version and channel, timeframe, mode, parameter overrides, size, leverage, status) and any server warnings, e.g. that the exchange cannot supply enough candle history. A stopAfterClose-only call returns a one-line confirmation. Get bot IDs from list_bots; check current values with get_bot_status.',
     {
       id: z.string().describe('The bot ID to update, obtained from list_bots.'),
@@ -639,8 +667,9 @@ export function registerBotTools(server: McpServer) {
       stopAfterClose: z.boolean().optional().describe('true: keep managing the open position, open no new entries, pause automatically once flat (immediately if already flat); false: cancel. Only an active bot can be set. Changing the bot\'s status (start_bot/stop_bot) also cancels it. Use it to get a bot flat before a strategy or timeframe change. Omit to leave unchanged.'),
       webhooks: z.array(webhookInputSchema).max(5).optional().describe('Outgoing webhook destinations to ADD (up to 5; the bot allows 5 in all), same fields as add_bot_webhook. Existing destinations are never replaced or removed. Confirm the URLs with the user; put tokens in `secrets` or header values (both write-only).'),
     },
-    { title: 'Update Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    withErrorHandling(async (args) => {
+    // openWorldHint: with `webhooks` the bot's trade events go to outside URLs.
+    { title: 'Update Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    withErrorHandling(noteWebhooksNotAdded(async (args, progress) => {
       const {
         id, name, strategyId, presetId, versionChannel, pinnedVersionId, timeframe, executionMode, spinIntervalSeconds,
         parameterOverrides, resetParameterOverrides, leverage, positionSizePercent, stopLoss, takeProfit, notifyOnTrade, stopAfterClose, webhooks,
@@ -821,6 +850,7 @@ export function registerBotTools(server: McpServer) {
       // refused one leaves those changes saved and nothing is retried or removed.
       let webhookOutcome: WebhookOutcome | undefined
       if (hasWebhooks) {
+        progress.webhooksAttempted = true
         webhookOutcome = await addWebhooksToBot(id, webhooks!)
         if (webhookOutcome.failed) {
           const warn = serverWarnings(res)
@@ -837,7 +867,7 @@ export function registerBotTools(server: McpServer) {
       const message = `Bot ${id} updated. ${parts.join(', ')}`
       // A stopAfterClose-only or webhooks-only call keeps its one-line reply (no GET before or after).
       if (!riskChanged && notifyOnTrade === undefined && !configChanged) {
-        const text = webhookOutcome ? `${message}\n${webhookSummaryLines(webhookOutcome).join('\n')}` : message
+        const text = webhookOutcome ? `${message}\n${webhookSummaryLines(webhookOutcome, webhooks!, botIsPaper(bot)).join('\n')}` : message
         return { content: [{ type: 'text' as const, text }] }
       }
 
@@ -864,9 +894,9 @@ export function registerBotTools(server: McpServer) {
         bot: view,
         ...(warnings.length ? { warnings } : {}),
         ...(notes.length ? { notes } : {}),
-        ...(webhookOutcome ? { webhooks: webhookSummaryView(webhookOutcome) } : {}),
+        ...(webhookOutcome ? { webhooks: webhookSummaryView(webhookOutcome, webhooks!, botIsPaper(bot)) } : {}),
       })
-    }),
+    })),
   )
 
   server.tool('start_bot', 'Activate a paused or stopped bot so it starts opening new positions on its next scheduled interval (paper or live, depending on the exchange it\'s attached to). deploy_bot starts a new bot itself unless it was given start: false. Check state first with get_bot_status; find bot IDs with list_bots.', {

@@ -6,6 +6,12 @@ export function jsonResult(data: unknown) {
   }
 }
 
+/** Text ending in exactly one full stop (a server sentence often brings its own), so "x." + "." never reads "x..". */
+export function endSentence(text: string): string {
+  const t = text.trimEnd()
+  return /[.!?…]$/.test(t) ? t : `${t}.`
+}
+
 /**
  * Best-effort strategy name lookup, owner-authoritative first with a
  * marketplace fallback (same pattern get_strategy uses in strategy.ts).
