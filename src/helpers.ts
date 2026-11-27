@@ -6,6 +6,12 @@ export function jsonResult(data: unknown) {
   }
 }
 
+/** Text ending in exactly one full stop (a server sentence often brings its own), so "x." + "." never reads "x..". */
+export function endSentence(text: string): string {
+  const t = text.trimEnd()
+  return /[.!?…]$/.test(t) ? t : `${t}.`
+}
+
 /**
  * Best-effort strategy name lookup, owner-authoritative first with a
  * marketplace fallback (same pattern get_strategy uses in strategy.ts).
@@ -51,6 +57,17 @@ export function errorResult(
     isError: true,
     content: [{ type: 'text' as const, text: JSON.stringify({ error }, null, 2) }],
   }
+}
+
+// A write sent with retry: false that got no answer: it timed out, never reached the server
+// or the server/gateway failed (5xx, e.g. a Cloudflare 524 while the server kept working).
+// The action may have been carried out. Returns a short reason, or undefined for a clean answer.
+export function noAnswerReason(err: unknown): string | undefined {
+  if (!(err instanceof ApiError)) return undefined
+  if (err.status === 408 || err.code === 'TIMEOUT') return 'the request timed out'
+  if (err.status === 0 || err.code === 'NETWORK_ERROR') return 'a network error'
+  if (err.status >= 500) return `HTTP ${err.status}`
+  return undefined
 }
 
 export function withErrorHandling<T extends (...args: any[]) => Promise<any>>(handler: T): T {
