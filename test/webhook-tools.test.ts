@@ -108,7 +108,8 @@ describe('add_bot_webhook', () => {
     const input = { name: 'OKX signal', url: 'https://example.com/hook', bodyTemplate: '{"a":"{{action}}"}', headers: [{ name: 'Authorization', value: SECRET }], constants: { TOKEN: 'abc' }, includePaper: false }
     const res = await handler('add_bot_webhook')({ botId: BOT, ...input })
 
-    expect(mockApi).toHaveBeenCalledTimes(1)
+    // one POST, then one read of the bot (paper or live) for the reply
+    expect(calledPaths()).toEqual([`POST /api/bots/${BOT}/webhooks`, `GET /api/bots/${BOT}`])
     expect(mockApi).toHaveBeenCalledWith(`/api/bots/${BOT}/webhooks`, { method: 'POST', retry: false, body: input })
     expect(jsonOf(res).destination.headers).toEqual([{ name: 'Authorization', valueHint: '••••3456' }])
     expect(textOf(res)).toContain('write-only')
@@ -356,10 +357,10 @@ describe('deploy_bot with webhooks', () => {
 describe('update_bot with webhooks', () => {
   const HOOK = { name: 'Relay', url: 'https://example.com/hook', headers: [{ name: 'X-Key', value: SECRET }] }
 
-  it('a webhooks-only call only POSTs adds: no GET, no PATCH, no delete, no listing', async () => {
+  it('a webhooks-only call only POSTs adds, then reads the bot once for paper/live: no PATCH, no delete, no listing', async () => {
     mockApi.mockResolvedValueOnce({ success: true, destination: serverDest({ id: 'dest-9', name: 'Relay' }) })
     const res = await handler('update_bot')({ id: BOT, webhooks: [HOOK] })
-    expect(mockApi.mock.calls).toEqual([[`/api/bots/${BOT}/webhooks`, { method: 'POST', retry: false, body: HOOK }]])
+    expect(mockApi.mock.calls).toEqual([[`/api/bots/${BOT}/webhooks`, { method: 'POST', retry: false, body: HOOK }], [`/api/bots/${BOT}`]])
     expect(textOf(res)).toContain('webhooks added: "Relay"')
     expectNoSecret(res)
   })
@@ -373,7 +374,11 @@ describe('update_bot with webhooks', () => {
     const res = await handler('update_bot')({ id: BOT, leverage: 3, webhooks: [HOOK] })
     const seq = mockApi.mock.calls.map((c) => `${c[1]?.method ?? 'GET'} ${c[0]}`)
     expect(seq).toEqual([`GET /api/bots/${BOT}`, `PATCH /api/bots/${BOT}`, `POST /api/bots/${BOT}/webhooks`, `GET /api/bots/${BOT}`])
-    expect(jsonOf(res).webhooks).toEqual({ added: [{ id: 'dest-9', name: 'Relay', sends: expect.stringContaining('on a live account only') }] })
+    // neither bot read says paper or live: said plainly, with the conditional warning
+    expect(jsonOf(res).webhooks).toEqual({
+      added: [{ id: 'dest-9', name: 'Relay', sends: expect.stringContaining('on a live account only') }],
+      warnings: [expect.stringContaining('could not be checked')],
+    })
   })
 
   it('a refused add reports the saved bot change and the failed webhook, retrying nothing', async () => {
@@ -535,7 +540,7 @@ describe('deploy_bot webhook flow edge cases', () => {
     mockApi
       .mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] })
       .mockResolvedValueOnce({ doc: { id: 'new-bot', status: 'active' } })
-      .mockRejectedValueOnce(new ApiError(500, 'HTTP_500', 'boom', false))
+      .mockRejectedValueOnce(new ApiError(409, 'HTTP_409', 'conflict', false))
     const res = await handler('deploy_bot')({ ...DEPLOY, webhooks: [HOOK] })
     const { error } = jsonOf(res)
     expect(error.code).toBe('BOT_RUNNING_WITHOUT_WEBHOOKS')
@@ -870,18 +875,19 @@ describe('P2-1 test_bot_webhook: a request that may have gone out is never "not 
 })
 
 describe('P2-2 annotations', () => {
-  it('pins the annotations of the seven webhook tools, deploy_bot and update_bot', async () => {
+  it('pins the annotations of the seven webhook tools, deploy_bot, update_bot and start_bot', async () => {
     const { tools } = await (await mcpClient()).listTools()
     const ann = (n: string) => tools.find((t) => t.name === n)!.annotations
     expect(ann('list_bot_webhooks')).toEqual({ title: 'List Bot Webhooks', readOnlyHint: true })
     expect(ann('add_bot_webhook')).toEqual({ title: 'Add Bot Webhook', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true })
-    expect(ann('update_bot_webhook')).toEqual({ title: 'Update Bot Webhook', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true })
+    expect(ann('update_bot_webhook')).toEqual({ title: 'Update Bot Webhook', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true })
     expect(ann('delete_bot_webhook')).toEqual({ title: 'Delete Bot Webhook', readOnlyHint: false, destructiveHint: true, idempotentHint: true })
     expect(ann('preview_bot_webhook')).toEqual({ title: 'Preview Bot Webhook', readOnlyHint: true, openWorldHint: false })
     expect(ann('test_bot_webhook')).toEqual({ title: 'Test Bot Webhook', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true })
     expect(ann('get_bot_webhook_deliveries')).toEqual({ title: 'Get Bot Webhook Deliveries', readOnlyHint: true })
     expect(ann('deploy_bot')).toEqual({ title: 'Deploy Bot', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true })
-    expect(ann('update_bot')).toEqual({ title: 'Update Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true })
+    expect(ann('update_bot')).toEqual({ title: 'Update Bot', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true })
+    expect(ann('start_bot')).toEqual({ title: 'Start Bot', readOnlyHint: false, destructiveHint: true, idempotentHint: true })
   })
 })
 
@@ -973,7 +979,7 @@ describe('P2-4 the reply says what each destination will actually send', () => {
   it('a paper deploy with a webhook without includePaper says it sends NOTHING, with a warning', async () => {
     const text = await deployWith([{ name: 'okx', url: 'https://example.com/h' }])
     expect(text).toContain('"okx" (dest-0) sends NOTHING: the bot trades on a PAPER account and includePaper is not true')
-    expect(text).toContain('Warning: webhook "okx" will send NOTHING')
+    expect(text).toContain('Warning: webhook "okx" will NEVER send this bot\'s trades')
     expect(text).not.toContain('are sent to that URL')
     expect(text).not.toMatch(/trade events \(opens and closes/)
   })
@@ -982,7 +988,7 @@ describe('P2-4 the reply says what each destination will actually send', () => {
     const text = await deployWith([{ name: 'closes', url: 'https://example.com/h', onOpen: false, includePaper: true }])
     expect(text).toContain('"closes" (dest-0) sends the bot\'s PAPER trade closes (includePaper is true)')
     expect(text).not.toContain('opens and closes')
-    expect(text).not.toContain('will send NOTHING')
+    expect(text).not.toContain('will NEVER send')
   })
 
   it('a live deploy sends live opens and closes and warns about nothing', async () => {
@@ -1013,12 +1019,24 @@ describe('P2-4 the reply says what each destination will actually send', () => {
     expect(upd.warnings[0]).toContain('www.okx.com, which looks like a trading service')
   })
 
-  it('add_bot_webhook builds its message from the flags it sent', async () => {
-    mockApi.mockResolvedValueOnce({ success: true, destination: serverDest() })
-    const out = jsonOf(await handler('add_bot_webhook')({ botId: BOT, name: 'x', url: 'https://example.com/h', onOpen: false }))
-    expect(out.message).toContain('It sends the bot\'s trade closes on a live account only (includePaper is false: a bot on a paper account sends nothing)')
-    expect(out.message).not.toContain('opens')
-    expect(out.warnings).toBeUndefined()
+  it('add_bot_webhook builds its message from the flags it sent and the bot it read', async () => {
+    const add = async (bot: unknown) => {
+      mockApi.mockReset()
+      mockApi.mockResolvedValueOnce({ success: true, destination: serverDest() })
+      if (bot instanceof Error) mockApi.mockRejectedValueOnce(bot); else mockApi.mockResolvedValueOnce(bot)
+      return jsonOf(await handler('add_bot_webhook')({ botId: BOT, name: 'x', url: 'https://example.com/h', onOpen: false }))
+    }
+    const live = await add({ doc: { id: BOT, exchanges: [{ isPaper: false }] } })
+    expect(live.message).toContain('It sends the bot\'s LIVE trade closes.')
+    expect(live.warnings).toBeUndefined()
+    const paper = await add({ doc: { id: BOT, exchanges: [{ isPaper: true }] } })
+    expect(paper.message).toContain('It sends NOTHING: the bot trades on a PAPER account and includePaper is not true')
+    expect(paper.warnings[0]).toContain('will NEVER send this bot\'s trades')
+    // the read failed: paper/live unknown, said plainly, with the conditional warning
+    const unknown = await add(new ApiError(500, 'HTTP_500', 'boom', false))
+    expect(unknown.message).toContain('on a live account only (includePaper is false: a bot on a paper account sends nothing)')
+    expect(unknown.message).not.toContain('opens')
+    expect(unknown.warnings[0]).toContain('could not be checked: if it does, webhook "x" will never send its trades')
   })
 
   it('update_bot knows a paper bot from its read and warns', async () => {
@@ -1029,7 +1047,7 @@ describe('P2-4 the reply says what each destination will actually send', () => {
       .mockResolvedValueOnce({ id: BOT, status: 'active' })
     const out = jsonOf(await handler('update_bot')({ id: BOT, leverage: 3, webhooks: [{ name: 'Relay', url: 'https://example.com/h' }] }))
     expect(out.webhooks.added[0].sends).toContain('NOTHING')
-    expect(out.webhooks.warnings[0]).toContain('will send NOTHING')
+    expect(out.webhooks.warnings[0]).toContain('will NEVER send this bot\'s trades')
   })
 
   it('the includePaper description carries the real-orders warning', () => {
@@ -1097,12 +1115,12 @@ describe('P3 scrubbing and masking', () => {
     expect(out.destinations[0].bodyTemplateMasked).toBeUndefined()
   })
 
-  it('a template with a literal token is masked and flagged so it is not sent back', async () => {
-    mockApi.mockResolvedValueOnce({ success: true, destinations: [serverDest({ bodyTemplate: '{"token":"literal-abc-123","side":"{{side}}"}' })] })
+  it('a template and constants with literal token-like values are shown exactly as saved (they are sent back in updates)', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, destinations: [serverDest({ bodyTemplate: '{"token":"literal-abc-123","side":"{{side}}"}', constants: { AUTH: 'Bearer xxxxxxxxxx' } })] })
     const out = jsonOf(await handler('list_bot_webhooks')({ botId: BOT }))
-    expect(out.destinations[0].bodyTemplate).toBe('{"token":"[hidden]","side":"{{side}}"}')
-    expect(out.destinations[0].bodyTemplateMasked).toBe(true)
-    expect(out.note).toContain('do not send that text back')
+    expect(out.destinations[0].bodyTemplate).toBe('{"token":"literal-abc-123","side":"{{side}}"}')
+    expect(out.destinations[0].constants).toEqual({ AUTH: 'Bearer xxxxxxxxxx' })
+    expect(out.destinations[0].bodyTemplateMasked).toBeUndefined()
   })
 })
 
@@ -1198,5 +1216,189 @@ describe('P3 outcomes and docs', () => {
     expect(url).toContain('`secrets`')
     expect(url).toContain('plain text')
     expect(url).not.toContain('header or constant can carry')
+  })
+})
+
+// --- review round 3 (delta review of 3a2b124) -----------------------------------------
+
+describe('P2-A what the views show can be sent back without corrupting the saved webhook', () => {
+  const TPL = '{"bot_id":123,"email_token":"a1b2c3d4e5f6a7b8","auth":"x9y8z7w6","side":"{{side}}"}'
+  const URL_WITH_TOKEN = 'https://api.3commas.io/signal_bots/webhooks?token=abc123def456'
+
+  it('list -> change an unrelated field -> update_bot_webhook sends the template, constants and URL unchanged', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, destinations: [serverDest({ bodyTemplate: TPL, constants: { AUTH: 'Bearer xxxxxxxxxx', SIG: 'sig=abcdef' }, url: URL_WITH_TOKEN })] })
+    const listed = jsonOf(await handler('list_bot_webhooks')({ botId: BOT, includeUrl: true })).destinations[0]
+    expect(listed.bodyTemplate).toBe(TPL)
+    expect(listed.constants).toEqual({ AUTH: 'Bearer xxxxxxxxxx', SIG: 'sig=abcdef' })
+    expect(listed.url).toBe(URL_WITH_TOKEN)
+
+    mockApi.mockResolvedValueOnce({ success: true, destination: serverDest() })
+    const res = await handler('update_bot_webhook')({ botId: BOT, destinationId: DEST, bodyTemplate: listed.bodyTemplate.replace('123', '456'), constants: listed.constants, url: listed.url })
+    expect(res.isError).toBeUndefined()
+    const body = mockApi.mock.calls[1][1].body
+    expect(body.bodyTemplate).toBe(TPL.replace('123', '456'))
+    expect(body.bodyTemplate).toContain('"email_token":"a1b2c3d4e5f6a7b8"')
+    expect(body.constants).toEqual({ AUTH: 'Bearer xxxxxxxxxx', SIG: 'sig=abcdef' })
+    expect(body.url).toBe(URL_WITH_TOKEN)
+  })
+
+  it.each([
+    ['a template with [hidden]', { bodyTemplate: '{"email_token":"[hidden]"}' }, 'body template contains "[hidden]"'],
+    ['a template with (hidden)', { bodyTemplate: '{"t":"(hidden)"}' }, 'body template contains "(hidden)"'],
+    ['the "(default body)" display text', { bodyTemplate: '(default body)' }, 'send "" for the default body'],
+    ['a constant with [hidden]', { constants: { AUTH: 'Bearer [hidden]' } }, 'constant AUTH contains "[hidden]"'],
+    ['a constant shown as (hidden)', { constants: { TOKEN: '(hidden)' } }, 'constant TOKEN contains "(hidden)"'],
+    ['a URL with [hidden]', { url: 'https://example.com/h?token=[hidden]' }, 'URL contains "[hidden]"'],
+    ['a header value [hidden]', { headers: [{ name: 'Authorization', value: 'Bearer [hidden]' }] }, 'Authorization contains "[hidden]"'],
+    ['a secret value [hidden]', { secrets: [{ name: 'TOK', value: '[hidden]' }] }, 'TOK contains "[hidden]"'],
+  ])('update_bot_webhook refuses %s before the PATCH', async (_l, change, why) => {
+    const res = await handler('update_bot_webhook')({ botId: BOT, destinationId: DEST, ...change })
+    const { error } = jsonOf(res)
+    expect(error.code).toBe('INVALID_WEBHOOK')
+    expect(error.message).toContain(why)
+    expect(mockApi).not.toHaveBeenCalled()
+  })
+
+  it('deploy_bot, update_bot and add_bot_webhook refuse a mask marker too, before any request', async () => {
+    const hook = { name: 'a', url: 'https://example.com/h', bodyTemplate: '{"email_token":"[hidden]"}' }
+    for (const r of [
+      await handler('deploy_bot')({ ...DEPLOY, webhooks: [hook] }),
+      await handler('update_bot')({ id: BOT, leverage: 2, webhooks: [hook] }),
+      await handler('add_bot_webhook')({ botId: BOT, ...hook }),
+      await handler('add_bot_webhook')({ botId: BOT, name: 'a', url: 'https://example.com/h', constants: { K: '(hidden)' } }),
+    ]) {
+      expect(jsonOf(r).error.code).toBe('INVALID_WEBHOOK')
+      expect(jsonOf(r).error.message).toContain('Send only the fields you change')
+    }
+    expect(mockApi).not.toHaveBeenCalled()
+  })
+})
+
+describe('P3-1 success replies are scrubbed with the values sent in the call', () => {
+  it('add_bot_webhook and update_bot_webhook: a server echo of a sent value in any field is hidden', async () => {
+    const echo = serverDest({ name: `n ${SECRET}`, bodyTemplate: `{"a":"${SECRET2}"}`, constants: { C: SECRET }, lastError: `x ${SECRET2}`, disabledReason: `y ${SECRET}` })
+    mockApi.mockResolvedValueOnce({ success: true, destination: echo })
+    const a = await handler('add_bot_webhook')({ botId: BOT, name: 'n', url: 'https://example.com/h', headers: [{ name: 'Authorization', value: SECRET }], secrets: [{ name: 'S', value: SECRET2 }] })
+    expectNoSecret(a)
+    mockApi.mockReset()
+    mockApi.mockResolvedValueOnce({ success: true, destination: echo })
+    const u = await handler('update_bot_webhook')({ botId: BOT, destinationId: DEST, headers: [{ name: 'Authorization', value: SECRET }], secrets: [{ name: 'S', value: SECRET2 }] })
+    expectNoSecret(u)
+  })
+
+  it('a valueHint is never more than its last 4 characters', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, destinations: [serverDest({ headers: [{ name: 'X-Key', valueHint: 'abcdefghijklmnop1234' }, { name: 'X-None', valueHint: '' }], secrets: [{ name: 'S', valueHint: '••••wxyz' }] })] })
+    const d = jsonOf(await handler('list_bot_webhooks')({ botId: BOT })).destinations[0]
+    expect(d.headers).toEqual([{ name: 'X-Key', valueHint: '••••1234' }, { name: 'X-None' }])
+    expect(d.secrets).toEqual([{ name: 'S', valueHint: '••••wxyz' }])
+  })
+})
+
+describe('P3-2 masking of server and receiver text', () => {
+  it.each([
+    ['an escaped slash in a JSON value', '{"token":"abc\\/defghij"}', 'defghij'],
+    ['Bearer with an escaped slash', 'Authorization: Bearer ab\\/cdefgh', 'cdefgh'],
+    ['an XML element', '<response><token>abcdef123</token></response>', 'abcdef123'],
+    ['an XML element with attributes', '<signalToken a="1">xyz987654</signalToken>', 'xyz987654'],
+  ])('%s is masked', async (_l, excerpt, leaked) => {
+    mockApi.mockResolvedValueOnce({ success: true, ok: false, status: 400, ms: 80, error: 'HTTP 400', excerpt })
+    const out = jsonOf(await handler('test_bot_webhook')({ botId: BOT, destinationId: DEST, confirm: true }))
+    expect(out.responseExcerpt).not.toContain(leaked)
+    expect(out.responseExcerpt).toContain('[hidden]')
+  })
+
+  it('a JSON-escaped quote still ends the value', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, ok: false, status: 400, ms: 80, error: 'HTTP 400', excerpt: '{\\"token\\":\\"abcdef\\",\\"side\\":\\"long\\"}' })
+    const out = jsonOf(await handler('test_bot_webhook')({ botId: BOT, destinationId: DEST, confirm: true }))
+    expect(out.responseExcerpt).toBe('{\\"token\\":\\"[hidden]\\",\\"side\\":\\"long\\"}')
+  })
+})
+
+describe('P3-3 / P3-4 paper and includePaper warnings', () => {
+  it('update_bot with webhooks only reads the bot and warns for a paper bot', async () => {
+    mockApi.mockResolvedValueOnce({ success: true, destination: serverDest({ id: 'dest-9', name: 'Relay' }) })
+      .mockResolvedValueOnce({ doc: { id: BOT, exchanges: [{ isPaper: true }] } })
+    const text = textOf(await handler('update_bot')({ id: BOT, webhooks: [{ name: 'Relay', url: 'https://example.com/h' }] }))
+    expect(text).toContain('"Relay" (dest-9) sends NOTHING: the bot trades on a PAPER account')
+    expect(text).toContain('Warning: webhook "Relay" will NEVER send this bot\'s trades')
+  })
+
+  it.each([
+    ['re-pointing the URL to a trading service', { url: 'https://www.okx.com/algo/signal/trigger' }, { includePaper: true }, true],
+    ['switching on a destination that sends paper trades', { enabled: true }, { includePaper: true, url: 'https://www.okx.com/algo/signal/trigger' }, true],
+    ['re-pointing a destination without includePaper', { url: 'https://www.okx.com/algo/signal/trigger' }, { includePaper: false }, false],
+    ['renaming one that sends paper trades', { name: 'renamed' }, { includePaper: true, url: 'https://www.okx.com/algo/signal/trigger' }, false],
+  ])('update_bot_webhook: %s', async (_l, change, saved, warns) => {
+    mockApi.mockResolvedValueOnce({ success: true, destination: serverDest({ ...saved, ...change }) })
+    const out = jsonOf(await handler('update_bot_webhook')({ botId: BOT, destinationId: DEST, ...change }))
+    if (warns) expect(out.warnings[0]).toContain('www.okx.com, which looks like a trading service')
+    else expect(out.warnings).toBeUndefined()
+  })
+
+  it('deploy_bot warns for destinations added switched off too (they can be switched on later)', async () => {
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockResolvedValueOnce({ doc: { id: 'new-bot', status: 'paused' } })
+      .mockResolvedValueOnce({ success: true, destination: serverDest({ id: 'd0' }) })
+      .mockResolvedValueOnce({ success: true, destination: serverDest({ id: 'd1' }) })
+      .mockResolvedValueOnce({ status: 'active' })
+    const text = textOf(await handler('deploy_bot')({ ...DEPLOY, webhooks: [
+      { name: 'off-paper', url: 'https://www.okx.com/algo/signal/trigger', enabled: false, includePaper: true },
+      { name: 'off-plain', url: 'https://example.com/h', onOpen: false, onClose: false },
+    ] }))
+    expect(text).toContain('Warning: webhook "off-paper" sends PAPER trades (includePaper: true) to www.okx.com')
+    expect(text).toContain('Warning: webhook "off-plain" will NEVER send this bot\'s trades')
+  })
+})
+
+describe('P3-5 a pause that got no answer is not reported as running', () => {
+  it('BOT_STATUS_UNKNOWN: check the bot, webhooks not added', async () => {
+    mockApi.mockResolvedValueOnce({ docs: [PAPER_EXCHANGE] }).mockResolvedValueOnce({ doc: { id: 'new-bot', status: 'active' } })
+      .mockRejectedValueOnce(new ApiError(408, 'TIMEOUT', 'Request timed out', false))
+    const { error } = jsonOf(await handler('deploy_bot')({ ...DEPLOY, webhooks: [{ name: 'a', url: 'https://example.com/h' }] }))
+    expect(error.code).toBe('BOT_STATUS_UNKNOWN')
+    expect(error.status).toBe('unknown')
+    expect(error.message).toContain('may or may not be paused')
+    expect(error.message).toContain('get_bot_status')
+    expect(error.message).toContain('webhooks were NOT added')
+    expect(error.message).not.toContain('is RUNNING')
+    expect(mockApi).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('P3-6 test refusals before sending carry sent: false', () => {
+  it.each([
+    [429, 'Test sends are limited to 5 per hour for each destination. Try again later.', 'rate_limited'],
+    [403, 'Your current plan does not include outgoing webhooks.', 'plan_required'],
+    [404, 'Destination not found', 'destination_not_found'],
+  ])('%s %s', async (status, message, code) => {
+    mockApi.mockRejectedValueOnce(refusal(status as number, message as string, code as string))
+    const { error } = jsonOf(await handler('test_bot_webhook')({ botId: BOT, destinationId: DEST, confirm: true }))
+    expect(error.code).toBe(code)
+    expect(error.sent).toBe(false)
+  })
+
+  it('the description says those arrive as errors', () => {
+    expect(descriptionOf('test_bot_webhook')).toContain('comes back as an error (400, 403 plan_required, 404, 429 rate_limited) with sent: false')
+  })
+})
+
+describe('P3-3 update_bot with other changes uses its final bot read for paper/live', () => {
+  it('only the read after the PATCH says paper: the reply still warns, with no extra read', async () => {
+    mockApi
+      .mockResolvedValueOnce({ id: BOT, positionSizing: { type: 'percentage', value: 10, leverage: 1 } }) // GET before: no exchange info
+      .mockResolvedValueOnce({ success: true }) // PATCH
+      .mockResolvedValueOnce({ success: true, destination: serverDest({ id: 'dest-9', name: 'Relay' }) }) // POST webhook
+      .mockResolvedValueOnce({ id: BOT, status: 'active', exchanges: [{ isPaper: true }] }) // GET after
+    const out = jsonOf(await handler('update_bot')({ id: BOT, leverage: 3, webhooks: [{ name: 'Relay', url: 'https://example.com/h' }] }))
+    expect(out.webhooks.added[0].sends).toContain('NOTHING')
+    expect(out.webhooks.warnings[0]).toContain('will NEVER send this bot\'s trades')
+    expect(mockApi).toHaveBeenCalledTimes(4)
+  })
+})
+
+describe('P3-2 masking keeps a quoted {{placeholder}} in server text', () => {
+  it('a server error that quotes the template keeps {{secret.NAME}} readable', async () => {
+    mockApi.mockRejectedValueOnce(refusal(400, 'Not valid JSON near "signalToken":"{{secret.OKX_TOKEN}}",} at the end.', 'x'))
+    const res = await handler('add_bot_webhook')({ botId: BOT, name: 'x', url: 'https://example.com/h' })
+    expect(jsonOf(res).error.message).toContain('"signalToken":"{{secret.OKX_TOKEN}}"')
   })
 })

@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { api, ApiError } from '../api.js'
 import { closedTrades } from '../closed-trades.js'
 import { endSentence, errorResult, jsonResult, noAnswerReason, withErrorHandling } from '../helpers.js'
-import { addWebhooksToBot, assertWebhooksValid, webhookFailureResult, webhookInputSchema, webhooksNotAddedError, webhookSummaryLines, webhookSummaryView, type WebhookOutcome } from './webhooks.js'
+import { addWebhooksToBot, assertWebhooksValid, botPaperStatus, readBotPaperStatus, webhookFailureResult, webhookInputSchema, webhooksNotAddedError, webhookSummaryLines, webhookSummaryView, type WebhookOutcome } from './webhooks.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 // The Bots collection has NO top-level isPaper/paperTrading field -- whether a
@@ -30,12 +30,6 @@ function noteWebhooksNotAdded<A extends { id: string, webhooks?: unknown[] }>(
       throw args.webhooks?.length && !progress.webhooksAttempted ? webhooksNotAddedError(err, args.id) : err
     }
   }
-}
-
-/** Whether the bot trades on a paper account, when the bot read says so (undefined: not known). */
-function botIsPaper(bot: any): boolean | undefined {
-  const isPaper = primaryExchangeOf(bot ?? {})?.isPaper
-  return typeof isPaper === 'boolean' ? isPaper : undefined
 }
 
 function strategyNameOf(bot: any): string | undefined {
@@ -583,6 +577,13 @@ export function registerBotTools(server: McpServer) {
             const paused = await api<any>(`/api/bots/${botId}/status`, { method: 'PATCH', retry: false, body: { status: 'paused' } })
             status = typeof paused?.status === 'string' ? paused.status : 'paused'
           } catch (err) {
+            const lost = noAnswerReason(err)
+            if (lost) {
+              // The pause may have landed: say what is known, not "running".
+              return errorResult('BOT_STATUS_UNKNOWN', `Do NOT call deploy_bot again. Bot ${botId} was created RUNNING although it was meant to start paused, and the pause request got no answer (${lost}), so it may or may not be paused now. Its webhooks were NOT added. Check get_bot_status (id ${botId}): if it is running, stop it with stop_bot, since a signal bot must not trade unobserved; then add its webhooks with add_bot_webhook and start it with start_bot.`, {
+                fields: { botId, botCreated: true, status: 'unknown', webhooksAdded: [] },
+              })
+            }
             return errorResult('BOT_RUNNING_WITHOUT_WEBHOOKS', `Do NOT call deploy_bot again. Bot ${botId} was created and is RUNNING (status ${status}) although it was meant to start paused, and its webhooks were NOT added (pausing it failed${err instanceof ApiError && err.code ? `: ${err.code}` : ''}). A signal bot must not trade unobserved: stop it now with stop_bot (id ${botId}), then add its webhooks with add_bot_webhook and start it with start_bot.`, {
               fields: { botId, botCreated: true, status, webhooksAdded: [] },
             })
@@ -667,8 +668,10 @@ export function registerBotTools(server: McpServer) {
       stopAfterClose: z.boolean().optional().describe('true: keep managing the open position, open no new entries, pause automatically once flat (immediately if already flat); false: cancel. Only an active bot can be set. Changing the bot\'s status (start_bot/stop_bot) also cancels it. Use it to get a bot flat before a strategy or timeframe change. Omit to leave unchanged.'),
       webhooks: z.array(webhookInputSchema).max(5).optional().describe('Outgoing webhook destinations to ADD (up to 5; the bot allows 5 in all), same fields as add_bot_webhook. Existing destinations are never replaced or removed. Confirm the URLs with the user; put tokens in `secrets` or header values (both write-only).'),
     },
-    // openWorldHint: with `webhooks` the bot's trade events go to outside URLs.
-    { title: 'Update Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    // destructiveHint: a strategy switch drops the old strategy's state, parameters and preset for
+    // good, and a live bot trades on the new settings. openWorldHint: with `webhooks` the bot's
+    // trade events go to outside URLs.
+    { title: 'Update Bot', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     withErrorHandling(noteWebhooksNotAdded(async (args, progress) => {
       const {
         id, name, strategyId, presetId, versionChannel, pinnedVersionId, timeframe, executionMode, spinIntervalSeconds,
@@ -867,7 +870,9 @@ export function registerBotTools(server: McpServer) {
       const message = `Bot ${id} updated. ${parts.join(', ')}`
       // A stopAfterClose-only or webhooks-only call keeps its one-line reply (no GET before or after).
       if (!riskChanged && notifyOnTrade === undefined && !configChanged) {
-        const text = webhookOutcome ? `${message}\n${webhookSummaryLines(webhookOutcome, webhooks!, botIsPaper(bot)).join('\n')}` : message
+        // Paper or live decides what the webhooks send. Nothing read the bot on this path: one read now (best effort).
+        const isPaper = webhookOutcome ? (botPaperStatus(bot) ?? await readBotPaperStatus(id)) : undefined
+        const text = webhookOutcome ? `${message}\n${webhookSummaryLines(webhookOutcome, webhooks!, isPaper).join('\n')}` : message
         return { content: [{ type: 'text' as const, text }] }
       }
 
@@ -894,14 +899,15 @@ export function registerBotTools(server: McpServer) {
         bot: view,
         ...(warnings.length ? { warnings } : {}),
         ...(notes.length ? { notes } : {}),
-        ...(webhookOutcome ? { webhooks: webhookSummaryView(webhookOutcome, webhooks!, botIsPaper(bot)) } : {}),
+        ...(webhookOutcome ? { webhooks: webhookSummaryView(webhookOutcome, webhooks!, botPaperStatus(after) ?? botPaperStatus(bot)) } : {}),
       })
     })),
   )
 
+  // Destructive like deploy_bot: a started bot trades (real money on a live account), and a trade cannot be undone.
   server.tool('start_bot', 'Activate a paused or stopped bot so it starts opening new positions on its next scheduled interval (paper or live, depending on the exchange it\'s attached to). deploy_bot starts a new bot itself unless it was given start: false. Check state first with get_bot_status; find bot IDs with list_bots.', {
     id: z.string().describe('The bot ID to activate, obtained from list_bots.'),
-  }, { title: 'Start Bot', readOnlyHint: false, destructiveHint: false, idempotentHint: true }, withErrorHandling(async ({ id }) => {
+  }, { title: 'Start Bot', readOnlyHint: false, destructiveHint: true, idempotentHint: true }, withErrorHandling(async ({ id }) => {
     await api<any>(`/api/bots/${id}/status`, { method: 'PATCH', body: { status: 'active' } })
     return { content: [{ type: 'text' as const, text: `Bot ${id} activated.` }] }
   }))
