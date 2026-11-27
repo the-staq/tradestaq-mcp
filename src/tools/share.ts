@@ -8,8 +8,11 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 // /api/bots/[id]/share (GET lists, POST creates, DELETE ?shareId= revokes). It accepts MCP
 // tokens from TradeStaq v0.22.6.0; before that it answered 401 to every MCP call.
 //
-// Scopes: listing needs any MCP scope. Creating or revoking needs the write scope of the
-// bot's account: mcp:live for a bot on a live account, mcp:paper (or mcp:live) for paper.
+// Scopes: listing needs any MCP scope. Creating or revoking needs the dedicated mcp:share scope
+// (any of your own bots, live or paper, and nothing else: TradeStaq with TODOS #148), or the
+// bot's account scope as before (mcp:paper for a paper bot, mcp:live for a live one). mcp:read is
+// refused. With only mcp:share the server refuses showBalance:true; the balance switch only lights
+// a "Balance" badge on the chart page, no balance figure is published.
 
 const EXPIRES_IN = ['1h', '24h', '7d', '30d', 'never'] as const
 
@@ -35,7 +38,7 @@ function shareView(s: any) {
 
 export function registerShareTools(server: McpServer) {
 
-  server.tool('list_bot_share_links', 'List a bot\'s active public share links: each link\'s URL (https://www.tradestaq.com/chart/...), when it expires, what it shows (positions, trades, PnL, balance) and how often it was opened. Use it to find a link to post or send instead of creating another. Read-only. Get bot IDs from list_bots.', {
+  server.tool('list_bot_share_links', 'List a bot\'s active public share links: each link\'s URL (https://www.tradestaq.com/chart/...), when it expires, what it shows (positions, trades, PnL) and how often it was opened. Use it to find a link to post or send instead of creating another. Read-only. Get bot IDs from list_bots.', {
     botId: z.string().describe('The bot ID, from list_bots.'),
   }, { title: 'List Bot Share Links', readOnlyHint: true }, withErrorHandling(async ({ botId }) => {
     const data = await api<any>(`/api/bots/${encodeURIComponent(botId)}/share`)
@@ -44,13 +47,13 @@ export function registerShareTools(server: McpServer) {
     return jsonResult(shares.map(shareView))
   }))
 
-  server.tool('create_bot_share_link', 'Create a PUBLIC link to a bot\'s live chart (https://www.tradestaq.com/chart/...) that anyone with the link can open, no account needed. It shows the bot\'s open positions and its trades by default; PnL and balance only when you turn them on. This publishes the bot\'s trading: confirm with the user what the link will show, and for how long, before calling. Check list_bot_share_links first to reuse a link. Needs write access to the bot\'s account (mcp:live for a live account). Limited to 10 links an hour. Revoke with revoke_bot_share_link.', {
+  server.tool('create_bot_share_link', 'Create a PUBLIC link to a bot\'s live chart (https://www.tradestaq.com/chart/...) that anyone with the link can open, no account needed. It shows the bot\'s open positions and its trades by default; with showPnL it also shows the bot\'s size and profit and loss (read-only, to anyone with the link). This publishes the bot\'s trading: confirm with the user what the link will show, and for how long, before calling. Check list_bot_share_links first to reuse a link. Needs the mcp:share scope (any of your own bots, live or paper), or mcp:paper for a paper bot / mcp:live for a live bot; mcp:read cannot. With only mcp:share, showBalance cannot be turned on. Every link records which app made it. Limited to 10 links an hour. Revoke with revoke_bot_share_link.', {
     botId: z.string().describe('The bot ID, from list_bots.'),
     expiresIn: z.enum(EXPIRES_IN).describe('How long the link works: "1h", "24h", "7d", "30d" or "never".'),
     showPositions: z.boolean().default(true).describe('Show the bot\'s open positions. Defaults to true.'),
     showTrades: z.boolean().default(true).describe('Show the bot\'s trades on the chart. Defaults to true.'),
     showPnL: z.boolean().default(false).describe('Show profit and loss. Defaults to false.'),
-    showBalance: z.boolean().default(false).describe('Show the account balance. Defaults to false; leave it off unless the user asks.'),
+    showBalance: z.boolean().default(false).describe('Light the "Balance" badge on the page. No balance figure is published. Refused with only mcp:share. Defaults to false; leave it off.'),
   }, { title: 'Create Bot Share Link', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, withErrorHandling(async ({ botId, expiresIn, showPositions, showTrades, showPnL, showBalance }) => {
     // Sent once: a resend after a timeout could leave a second public link behind.
     const data = await api<any>(`/api/bots/${encodeURIComponent(botId)}/share`, {
@@ -61,7 +64,7 @@ export function registerShareTools(server: McpServer) {
     return jsonResult(shareView(data?.share ?? data))
   }))
 
-  server.tool('revoke_bot_share_link', 'Turn off one of a bot\'s public share links, so its URL stops working. The link cannot be turned back on (create a new one instead). Needs write access to the bot\'s account (mcp:live for a live account). Get link IDs from list_bot_share_links.', {
+  server.tool('revoke_bot_share_link', 'Turn off one of a bot\'s public share links, so its URL stops working. The link cannot be turned back on (create a new one instead). Needs the mcp:share scope on your own bot, or mcp:paper for a paper bot / mcp:live for a live bot. Revoking an already revoked link changes nothing. Get link IDs from list_bot_share_links.', {
     botId: z.string().describe('The bot ID, from list_bots.'),
     shareId: z.string().describe('The link\'s id, from list_bot_share_links.'),
   }, { title: 'Revoke Bot Share Link', readOnlyHint: false, destructiveHint: true, idempotentHint: true }, withErrorHandling(async ({ botId, shareId }) => {
