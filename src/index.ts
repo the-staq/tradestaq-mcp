@@ -93,7 +93,7 @@ if (mode === 'http') {
         JSON.stringify({
           resource: mcpUrl,
           authorization_servers: [authServer],
-          scopes_supported: ['mcp:read', 'mcp:paper', 'mcp:live'],
+          scopes_supported: ['mcp:read', 'mcp:paper', 'mcp:live', 'mcp:share'],
           bearer_methods_supported: ['header'],
           resource_documentation: `${authServer}/docs/mcp/overview`,
         }),
