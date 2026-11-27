@@ -132,6 +132,83 @@ describe('get_strategy', () => {
     expect(body.version).toBe('1.2.0')
   })
 
+  it('non-owned, old server: no primaryTimeframe, reads latestVersion.validationConfig.timeframe', async () => {
+    mockApi
+      .mockRejectedValueOnce(new ApiError(403, 'HTTP_403', 'Forbidden', false))
+      .mockResolvedValueOnce({
+        doc: {
+          id: 'm1', name: 'GhostRider',
+          latestVersion: { semanticVersion: '1.2.0', validationConfig: { timeframe: '4h' }, parameterGroups: [] },
+        },
+      })
+
+    const result = await getToolHandler('get_strategy')({ id: 'm1' })
+
+    expect((await jsonOf(result)).timeframe).toBe('4h')
+  })
+
+  it('non-owned, new server: validationConfig stripped, reads the top-level primaryTimeframe', async () => {
+    mockApi
+      .mockRejectedValueOnce(new ApiError(403, 'HTTP_403', 'Forbidden', false))
+      .mockResolvedValueOnce({
+        doc: { id: 'm1', name: 'GhostRider', latestVersion: { semanticVersion: '1.2.0', parameterGroups: [] } },
+        primaryTimeframe: '1d',
+        parameterGroups: [],
+      })
+
+    const result = await getToolHandler('get_strategy')({ id: 'm1' })
+
+    const body = await jsonOf(result)
+    expect(body.timeframe).toBe('1d')
+    expect(body.version).toBe('1.2.0')
+  })
+
+  it('non-owned: primaryTimeframe wins when both it and validationConfig are present', async () => {
+    mockApi
+      .mockRejectedValueOnce(new ApiError(403, 'HTTP_403', 'Forbidden', false))
+      .mockResolvedValueOnce({
+        doc: { id: 'm1', name: 'GhostRider', latestVersion: { validationConfig: { timeframe: '4h' } } },
+        primaryTimeframe: '1h',
+      })
+
+    const result = await getToolHandler('get_strategy')({ id: 'm1' })
+
+    expect((await jsonOf(result)).timeframe).toBe('1h')
+  })
+
+  it('non-owned: a null primaryTimeframe (server could not resolve one) falls back to validationConfig', async () => {
+    mockApi
+      .mockRejectedValueOnce(new ApiError(403, 'HTTP_403', 'Forbidden', false))
+      .mockResolvedValueOnce({
+        doc: { id: 'm1', name: 'GhostRider', latestVersion: { validationConfig: { timeframe: '4h' } } },
+        primaryTimeframe: null,
+      })
+
+    const result = await getToolHandler('get_strategy')({ id: 'm1' })
+
+    expect((await jsonOf(result)).timeframe).toBe('4h')
+  })
+
+  it('non-owned: neither field present leaves timeframe unset', async () => {
+    mockApi
+      .mockRejectedValueOnce(new ApiError(403, 'HTTP_403', 'Forbidden', false))
+      .mockResolvedValueOnce({ doc: { id: 'm1', name: 'GhostRider', latestVersion: {} }, primaryTimeframe: null })
+
+    const result = await getToolHandler('get_strategy')({ id: 'm1' })
+
+    expect((await jsonOf(result)).timeframe).toBeUndefined()
+  })
+
+  it('owner: primaryTimeframe on the doc is used even when a validationConfig is also present', async () => {
+    mockApi.mockResolvedValue({
+      data: { id: 's1', name: 'Mine', primaryTimeframe: '15m', validationConfig: { timeframe: '4h' }, parameterGroups: [] },
+    })
+
+    const result = await getToolHandler('get_strategy')({ id: 's1' })
+
+    expect((await jsonOf(result)).timeframe).toBe('15m')
+  })
+
   it('falls back on a 404 the same way as a 403', async () => {
     mockApi
       .mockRejectedValueOnce(new ApiError(404, 'HTTP_404', 'Not Found', false))
