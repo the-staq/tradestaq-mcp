@@ -22,6 +22,9 @@
 - A `LICENSE` file (MIT, as `package.json` already declared).
 
 ### Fixed
+- `get_strategy` now reads the server's top-level `primaryTimeframe` for other users' strategies and falls back to the version's `validationConfig.timeframe`, so the timeframe survives the server change that hides validation data from non-owners.
+
+### Fixed
 - **Tool text no longer says a link can show the account balance.** `showBalance` only lights a "Balance" badge on the chart page; no balance figure is published. What a link can show is positions, trades and, with `showPnL`, the bot's size and PnL, read-only, to anyone with the URL.
 
 ## [0.8.0] - 2026-11-12

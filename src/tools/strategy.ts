@@ -61,6 +61,9 @@ export function registerStrategyTools(server: McpServer) {
     // own (a 403/404 from the owner-only endpoint just means "not yours").
     let s: any
     let owned = true
+    // The marketplace route returns `primaryTimeframe` beside `doc`, not
+    // inside it; the owner endpoint puts it on the doc itself.
+    let topLevelTimeframe: string | null | undefined
     try {
       const raw = await api<any>(`/api/user-strategies/${id}`)
       s = raw.data || raw
@@ -69,6 +72,7 @@ export function registerStrategyTools(server: McpServer) {
         owned = false
         const raw = await api<any>(`/api/tradedroid/strategies/${id}`)
         s = raw.doc || raw
+        topLevelTimeframe = raw.primaryTimeframe
       } else {
         throw err
       }
@@ -104,7 +108,10 @@ export function registerStrategyTools(server: McpServer) {
       // version/requiredIndicators live only on the version doc and aren't
       // surfaced by the owner-authoritative endpoint's response shape.
       version: owned ? undefined : (versionSource.semanticVersion || versionSource.version),
-      timeframe: owned ? s.primaryTimeframe : versionSource.validationConfig?.timeframe,
+      // Prefer the top-level primaryTimeframe. Servers before the release that
+      // strips validationConfig from other users' strategies send no
+      // primaryTimeframe on the marketplace route, so fall back to it.
+      timeframe: (owned ? s.primaryTimeframe : topLevelTimeframe) || versionSource.validationConfig?.timeframe || undefined,
       requiredIndicators: owned ? undefined : versionSource.requiredIndicators,
       parameterGroups,
       dcaConfig: s.dcaConfig,
